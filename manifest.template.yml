@@ -1,0 +1,29 @@
+applications:
+  - name: dh-api
+    memory: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    env:
+      DH_DB_DRIVER: hana
+      DH_DB_HOST: <your-hana-cloud-host>.hanacloud.ondemand.com
+      DH_DB_PORT: "443"
+      DH_DB_USER: DBADMIN
+      DH_DB_PASSWORD: <set-via-cf-set-env>
+      AZURE_CLIENT_ID: <azure-app-registration-client-id>
+      AZURE_TENANT_ID: <azure-tenant-id>
+      AZURE_CLIENT_SECRET: <set-via-cf-set-env>
+      JWT_SECRET: <set-via-cf-set-env>
+      JWT_TTL_HOURS: "168"
+
+# SETUP INSTRUCTIONS
+# ------------------
+# Never commit manifest.yml (it contains real credentials).
+# After cf push, set secrets via:
+#
+#   cf set-env dh-api DH_DB_PASSWORD "your-password"
+#   cf set-env dh-api AZURE_CLIENT_SECRET "your-secret"
+#   cf set-env dh-api JWT_SECRET "your-jwt-secret"
+#   cf restage dh-api
+#
+# See README.md for full setup guide.
