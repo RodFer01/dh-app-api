@@ -369,16 +369,14 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
             pass
 
     editable_send_content = []
-    if spark_sessions and editable_block_id:
+    if spark_sessions:
         html = _build_des_html(body.test_name or "Contato Teste", spark_sessions)
-        editable_send_content = [{"html": html, "id": editable_block_id}]
+        editable_send_content = [html]
         print(f"[DH-ESS] send-test editable_block_id={editable_block_id} html_len={len(html)}", flush=True)
-    elif spark_sessions:
-        print(f"[DH-ESS] send-test spark_sessions={len(spark_sessions)} but no editable_block_id — skipping editableSendContent", flush=True)
 
     payload = {
-        "to": body.test_email,
         "from": body.from_email,
+        "to": body.test_email,
         "subjectLine": f"[TESTE] {body.subject}",
         "useBcc": False,
         "editableSendContent": editable_send_content,
@@ -440,10 +438,7 @@ def send_campaign(campaign_id: int, body: SendIn, current_user=Depends(verify_to
         if spark_sessions:
             first_name = (c.get("contact_name") or "").split()[0]
             html = _build_des_html(first_name, spark_sessions)
-            item = {"content": html}
-            if editable_block_id:
-                item["id"] = editable_block_id
-            editable_send_content = [item]
+            editable_send_content = [html]
 
         payload = {
             "to": to_email,
