@@ -153,6 +153,15 @@ class SendIn(BaseModel):
     from_email: str
 
 
+class SendTestIn(BaseModel):
+    template_id: str
+    template_name: Optional[str] = None
+    subject: str
+    from_email: str
+    test_email: str
+    test_name: Optional[str] = "Contato Teste"
+
+
 class RecordIn(BaseModel):
     template_id: str
     template_name: Optional[str] = None
@@ -242,6 +251,52 @@ def sender_emails(current_user=Depends(verify_token)):
 
 
 # ── Send emails ───────────────────────────────────────────────────────────────
+
+@router.post("/campaigns/{campaign_id}/send-test")
+def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_token)):
+    """Send a single test email to preview the template before the full blast."""
+    s = _get_ess_session(current_user.get("email"))
+
+    spark_sessions = _get_campaign_spark_sessions(campaign_id)
+
+    editable_block_id = None
+    if spark_sessions:
+        try:
+            editable_block_id = _get_template_editable_block_id(s, body.template_id)
+        except Exception:
+            pass
+
+    editable_send_content = []
+    if spark_sessions:
+        html = _build_des_html(body.test_name or "Contato Teste", spark_sessions)
+        item = {"content": html}
+        if editable_block_id:
+            item["id"] = editable_block_id
+        editable_send_content = [item]
+
+    payload = {
+        "to": body.test_email,
+        "from": body.from_email,
+        "subjectLine": f"[TESTE] {body.subject}",
+        "useBcc": False,
+        "editableSendContent": editable_send_content,
+    }
+    try:
+        resp = s.post(
+            f"{ESS_BASE}/api/emailTemplate/{body.template_id}/send",
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return {"ok": True}
+        raise HTTPException(status_code=resp.status_code, detail=f"ESS error: {resp.text[:200]}")
+    except _req.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="BTP server cannot reach ess.int.sap — use CLI script locally.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:300])
+
 
 @router.post("/campaigns/{campaign_id}/send")
 def send_campaign(campaign_id: int, body: SendIn, current_user=Depends(verify_token)):
