@@ -73,15 +73,19 @@ def _get_template_editable_block_id(sess: _req.Session, template_id: str):
     try:
         r = sess.get(f"{ESS_BASE}/api/emailTemplate/{template_id}", timeout=10)
         if r.status_code != 200:
+            logger.warning("ESS template fetch status=%s", r.status_code)
             return None
         data = r.json()
+        logger.info("ESS template keys=%s", list(data.keys()))
         for key in ("editableContent", "editableBlocks", "sections", "blocks"):
             blocks = data.get(key)
             if isinstance(blocks, list) and blocks:
+                logger.info("ESS template found key=%s first_item=%s", key, blocks[0])
                 first = blocks[0]
                 return first.get("id") or first.get("contentId") or first.get("blockId")
         return None
-    except Exception:
+    except Exception as exc:
+        logger.warning("ESS template fetch error: %s", exc)
         return None
 
 
@@ -334,6 +338,19 @@ def sender_emails(current_user=Depends(verify_token)):
         raise HTTPException(status_code=503, detail="BTP server cannot reach ess.int.sap.")
 
 
+@router.get("/templates/{template_id}/raw")
+def get_template_raw(template_id: str, current_user=Depends(verify_token)):
+    """Return raw ESS template JSON — use to inspect editable block structure."""
+    s = _get_ess_session(current_user.get("email"))
+    try:
+        r = s.get(f"{ESS_BASE}/api/emailTemplate/{template_id}", timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+        return r.json()
+    except _req.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="BTP server cannot reach ess.int.sap.")
+
+
 # ── Send emails ───────────────────────────────────────────────────────────────
 
 @router.post("/campaigns/{campaign_id}/send-test")
@@ -353,10 +370,12 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
     editable_send_content = []
     if spark_sessions:
         html = _build_des_html(body.test_name or "Contato Teste", spark_sessions)
-        item = {"content": html}
+        item = {"html": html}
         if editable_block_id:
             item["id"] = editable_block_id
         editable_send_content = [item]
+        logger.info("ESS send-test editable_block_id=%s item_keys=%s html_len=%d",
+                    editable_block_id, list(item.keys()), len(html))
 
     payload = {
         "to": body.test_email,
@@ -365,6 +384,8 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
         "useBcc": False,
         "editableSendContent": editable_send_content,
     }
+    logger.info("ESS send-test payload_keys=%s editableSendContent=%s",
+                list(payload.keys()), editable_send_content[:1] if editable_send_content else [])
     try:
         resp = s.post(
             f"{ESS_BASE}/api/emailTemplate/{body.template_id}/send",
