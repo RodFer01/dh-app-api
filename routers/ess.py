@@ -11,12 +11,16 @@ which runs locally. Results from the CLI script are pushed back via the
 /sends/record endpoint.
 """
 import json as _json
+import logging
+import secrets as _secrets
 import requests as _req
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from auth import verify_token
 from database import execute, execute_returning, query, query_one, IS_HANA
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ess", tags=["ess"])
 
@@ -206,21 +210,101 @@ def store_cookie(body: CookieIn, current_user=Depends(verify_token)):
 @router.get("/cookie/status")
 def cookie_status(current_user=Depends(verify_token)):
     row = query_one(
-        f"SELECT stored_at FROM ess_credentials WHERE user_email={_PH} AND cookie_name='EmailSelfService'",
+        f"SELECT cookie_value, stored_at FROM ess_credentials WHERE user_email={_PH} AND cookie_name='EmailSelfService'",
         [current_user.get("email")]
     )
+    if not row:
+        return {"connected": False, "stored_at": None}
+    # Validate the cookie against ESS if reachable
+    valid = True
+    try:
+        s = _req.Session()
+        s.cookies.set("EmailSelfService", row["cookie_value"], domain="ess.int.sap")
+        r = s.get(f"{ESS_BASE}/api/account/getCurrentUserRights", timeout=6)
+        if r.status_code == 401:
+            valid = False
+    except _req.exceptions.ConnectionError:
+        pass  # BTP can't reach ESS — assume valid, let send fail with clear message
+    except Exception:
+        pass
     return {
-        "connected": bool(row),
-        "stored_at": str(row["stored_at"])[:19] if row else None,
+        "connected": valid,
+        "stored_at": str(row["stored_at"])[:19],
+        "cookie_expired": not valid,
     }
 
 
 @router.delete("/cookie")
 def delete_cookie(current_user=Depends(verify_token)):
     execute(
-        f"DELETE FROM ess_credentials WHERE user_email={_PH}",
+        f"DELETE FROM ess_credentials WHERE user_email={_PH} AND cookie_name='EmailSelfService'",
         [current_user.get("email")]
     )
+    return {"ok": True}
+
+
+# ── Extension secret (auto-renewal) ──────────────────────────────────────────
+
+@router.get("/extension-secret")
+def get_extension_secret(current_user=Depends(verify_token)):
+    row = query_one(
+        f"SELECT cookie_value FROM ess_credentials WHERE user_email={_PH} AND cookie_name='extension_secret'",
+        [current_user.get("email")]
+    )
+    return {"secret": row["cookie_value"] if row else None}
+
+
+@router.post("/extension-secret/generate")
+def generate_extension_secret(current_user=Depends(verify_token)):
+    email = current_user.get("email")
+    token = _secrets.token_hex(32)
+    existing = query_one(
+        f"SELECT id FROM ess_credentials WHERE user_email={_PH} AND cookie_name='extension_secret'",
+        [email]
+    )
+    if existing:
+        execute(
+            f"UPDATE ess_credentials SET cookie_value={_PH}, stored_at=CURRENT_TIMESTAMP "
+            f"WHERE user_email={_PH} AND cookie_name='extension_secret'",
+            [token, email]
+        )
+    else:
+        execute(
+            f"INSERT INTO ess_credentials (user_email, cookie_name, cookie_value) VALUES ({_PH},{_PH},{_PH})",
+            [email, "extension_secret", token]
+        )
+    return {"secret": token}
+
+
+@router.post("/cookie/auto-renew")
+def auto_renew_cookie(request: Request, body: CookieIn):
+    """Update ESS cookie from the Chrome extension (no DH JWT — uses extension secret)."""
+    secret = request.headers.get("X-Extension-Secret", "")
+    if not secret:
+        raise HTTPException(status_code=401, detail="Missing X-Extension-Secret header.")
+    row = query_one(
+        f"SELECT user_email FROM ess_credentials WHERE cookie_name='extension_secret' AND cookie_value={_PH}",
+        [secret]
+    )
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid extension secret.")
+    user_email = row["user_email"]
+    existing = query_one(
+        f"SELECT id FROM ess_credentials WHERE user_email={_PH} AND cookie_name='EmailSelfService'",
+        [user_email]
+    )
+    if existing:
+        execute(
+            f"UPDATE ess_credentials SET cookie_value={_PH}, stored_at=CURRENT_TIMESTAMP "
+            f"WHERE user_email={_PH} AND cookie_name='EmailSelfService'",
+            [body.email_self_service, user_email]
+        )
+    else:
+        execute(
+            f"INSERT INTO ess_credentials (user_email, cookie_name, cookie_value) VALUES ({_PH},{_PH},{_PH})",
+            [user_email, "EmailSelfService", body.email_self_service]
+        )
+    logger.info("ESS cookie auto-renewed via extension for user=%s", user_email)
     return {"ok": True}
 
 
@@ -287,8 +371,11 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
             json=payload,
             timeout=30,
         )
+        logger.info("ESS send-test to=%s status=%s body=%s", body.test_email, resp.status_code, resp.text[:300])
         if resp.status_code == 200:
-            return {"ok": True}
+            return {"ok": True, "ess_response": resp.text[:500]}
+        if resp.status_code == 401:
+            raise HTTPException(status_code=400, detail="Cookie ESS expirou. Reconecte em Configurações → ESS.")
         raise HTTPException(status_code=resp.status_code, detail=f"ESS error: {resp.text[:200]}")
     except _req.exceptions.ConnectionError:
         raise HTTPException(status_code=503, detail="BTP server cannot reach ess.int.sap — use CLI script locally.")
@@ -354,8 +441,13 @@ def send_campaign(campaign_id: int, body: SendIn, current_user=Depends(verify_to
                 json=payload,
                 timeout=30,
             )
+            logger.info("ESS send to=%s status=%s body=%s", to_email, resp.status_code, resp.text[:300])
             if resp.status_code == 200:
                 status = "sent"
+                err = resp.text[:200] if resp.text.strip() else ""
+            elif resp.status_code == 401:
+                status = "failed"
+                err = "Cookie ESS expirou. Reconecte em Configurações → ESS."
             else:
                 err = f"HTTP {resp.status_code}: {resp.text[:200]}"
         except _req.exceptions.ConnectionError:

@@ -590,6 +590,28 @@ def _startup_ensure_account_specs():
         pass  # already exists
 
 
+@app.on_event("startup")
+def _startup_campaigns_migrations():
+    """Add columns to campaigns table that may be missing in older deployments."""
+    from database import execute, query_one, IS_HANA
+    migrations = [
+        "ALTER TABLE campaigns ADD (spark_sessions_json NCLOB DEFAULT NULL)" if True else "",
+    ]
+    # HANA uses ADD (col type) syntax; check if column exists first
+    try:
+        if IS_HANA:
+            exists = query_one(
+                "SELECT COUNT(*) AS cnt FROM TABLE_COLUMNS "
+                "WHERE TABLE_NAME='CAMPAIGNS' AND COLUMN_NAME='SPARK_SESSIONS_JSON'"
+            )
+            if not exists or (exists.get("cnt") or exists.get("CNT") or 0) == 0:
+                execute("ALTER TABLE campaigns ADD (spark_sessions_json NCLOB DEFAULT NULL)")
+        else:
+            execute("ALTER TABLE campaigns ADD COLUMN spark_sessions_json NCLOB DEFAULT NULL")
+    except Exception:
+        pass
+
+
 @app.post("/api/debug/create-account-specs", tags=["auth"])
 def create_account_specs(_user=Depends(verify_token)):
     """Create empty account_specs table in HANA if missing. Run ETL after to populate."""

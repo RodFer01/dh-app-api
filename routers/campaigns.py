@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from auth import verify_token
-from database import execute, execute_returning, query
+from database import execute, execute_returning, query, query_one, IS_HANA
 from datetime import date
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
@@ -26,9 +26,18 @@ class SessionsPatch(BaseModel):
 
 def _ensure_sessions_column():
     try:
-        execute("ALTER TABLE campaigns ADD COLUMN spark_sessions_json NCLOB DEFAULT NULL")
+        if IS_HANA:
+            exists = query_one(
+                "SELECT COUNT(*) AS cnt FROM TABLE_COLUMNS "
+                "WHERE TABLE_NAME='CAMPAIGNS' AND COLUMN_NAME='SPARK_SESSIONS_JSON'"
+            )
+            cnt = exists.get("cnt") or exists.get("CNT") or 0 if exists else 0
+            if not cnt:
+                execute("ALTER TABLE campaigns ADD (spark_sessions_json NCLOB DEFAULT NULL)")
+        else:
+            execute("ALTER TABLE campaigns ADD COLUMN spark_sessions_json NCLOB DEFAULT NULL")
     except Exception:
-        pass  # column already exists
+        pass
 
 
 class ContactIn(BaseModel):
