@@ -73,19 +73,20 @@ def _get_template_editable_block_id(sess: _req.Session, template_id: str):
     try:
         r = sess.get(f"{ESS_BASE}/api/emailTemplate/{template_id}", timeout=10)
         if r.status_code != 200:
-            logger.warning("ESS template fetch status=%s", r.status_code)
+            print(f"[DH-ESS] template fetch status={r.status_code}", flush=True)
             return None
         data = r.json()
-        logger.info("ESS template keys=%s", list(data.keys()))
+        print(f"[DH-ESS] template keys={list(data.keys())}", flush=True)
         for key in ("editableContent", "editableBlocks", "sections", "blocks"):
             blocks = data.get(key)
             if isinstance(blocks, list) and blocks:
-                logger.info("ESS template found key=%s first_item=%s", key, blocks[0])
+                print(f"[DH-ESS] template found key={key} first_item_keys={list(blocks[0].keys()) if isinstance(blocks[0], dict) else blocks[0]}", flush=True)
                 first = blocks[0]
                 return first.get("id") or first.get("contentId") or first.get("blockId")
+        print(f"[DH-ESS] template no editable block found in keys", flush=True)
         return None
     except Exception as exc:
-        logger.warning("ESS template fetch error: %s", exc)
+        print(f"[DH-ESS] template fetch error: {exc}", flush=True)
         return None
 
 
@@ -368,14 +369,12 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
             pass
 
     editable_send_content = []
-    if spark_sessions:
+    if spark_sessions and editable_block_id:
         html = _build_des_html(body.test_name or "Contato Teste", spark_sessions)
-        item = {"html": html}
-        if editable_block_id:
-            item["id"] = editable_block_id
-        editable_send_content = [item]
-        logger.info("ESS send-test editable_block_id=%s item_keys=%s html_len=%d",
-                    editable_block_id, list(item.keys()), len(html))
+        editable_send_content = [{"html": html, "id": editable_block_id}]
+        print(f"[DH-ESS] send-test editable_block_id={editable_block_id} html_len={len(html)}", flush=True)
+    elif spark_sessions:
+        print(f"[DH-ESS] send-test spark_sessions={len(spark_sessions)} but no editable_block_id — skipping editableSendContent", flush=True)
 
     payload = {
         "to": body.test_email,
@@ -384,15 +383,14 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
         "useBcc": False,
         "editableSendContent": editable_send_content,
     }
-    logger.info("ESS send-test payload_keys=%s editableSendContent=%s",
-                list(payload.keys()), editable_send_content[:1] if editable_send_content else [])
+    print(f"[DH-ESS] send-test sending payload editableSendContent_len={len(editable_send_content)}", flush=True)
     try:
         resp = s.post(
             f"{ESS_BASE}/api/emailTemplate/{body.template_id}/send",
             json=payload,
             timeout=30,
         )
-        logger.info("ESS send-test to=%s status=%s body=%s", body.test_email, resp.status_code, resp.text[:300])
+        print(f"[DH-ESS] send-test status={resp.status_code} body={resp.text[:400]}", flush=True)
         if resp.status_code == 200:
             return {"ok": True, "ess_response": resp.text[:500]}
         if resp.status_code == 401:
