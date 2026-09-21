@@ -1,14 +1,13 @@
 """ETL management router — upload files and trigger ETL jobs."""
 import sys
 import os
-import io
 import shutil
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -183,6 +182,30 @@ SOURCES = [
         "accept":   ".xlsx",
         "etls":     ["etl_rvp"],
     },
+    {
+        "id":       "progression",
+        "label":    "Progression Framework",
+        "desc":     "Progression Framework_*.xlsx — tab Details (Prioritie, Probability %)",
+        "file_key": "progression",
+        "accept":   ".xlsx",
+        "etls":     ["etl_progression"],
+    },
+    {
+        "id":       "innovation_dash",
+        "label":    "Innovation Dashboard",
+        "desc":     "InnovationDash_*.xlsx — Base instalada por BP (sheet myListBP)",
+        "file_key": "innovation_dash",
+        "accept":   ".xlsx",
+        "etls":     ["etl_innovation"],
+    },
+    {
+        "id":       "mastercode",
+        "label":    "Mastercode (SPEC/IAE)",
+        "desc":     "ML*.xlsx — Business Partner → IAE, SPEC CX/HXM/BTP/etc.",
+        "file_key": "mastercode",
+        "accept":   ".xlsx",
+        "etls":     ["etl_mastercode"],
+    },
     # ── 2025 Historical ───────────────────────────────────────────────────────
     {
         "id":       "melody_2025",
@@ -265,7 +288,7 @@ def get_job(job_id: str, _user=Depends(verify_token)):
     return job
 
 
-def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_key: Optional[str]):
+def _run_etl_job(job_id: str, source_id: str, saved_paths: list[Path], file_key: Optional[str]):
     """Run in a background thread. Updates job state in _jobs."""
     log_lines = []
 
@@ -283,30 +306,21 @@ def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_k
             sys.path.insert(0, str(ETL_DIR))
         os.chdir(ETL_DIR)
 
-        # If a file was uploaded, overwrite the config path
-        if saved_path and file_key:
-            import config
-            dest = config.FILES[file_key]
-            _log(f"Copiando arquivo para {dest.name} …")
-            shutil.copy2(saved_path, dest)
-            _log(f"Arquivo salvo ({saved_path.stat().st_size / 1024:.0f} KB)")
-            saved_path.unlink(missing_ok=True)
-
         # Find the source definition
         src = next((s for s in SOURCES if s["id"] == source_id), None)
         if not src:
             raise ValueError(f"Source '{source_id}' not found")
 
         total_rows = 0
+        multi_file_sources = {"pipeline", "pipeline_lw"}
 
         if source_id == "full_run":
             _log("Iniciando Full ETL …")
             import run_all as _run_all
             import importlib
             importlib.reload(_run_all)
-            # Replicate run_all logic inline so we can capture output
-            import etl_fx, etl_targets, etl_vat, etl_melody, etl_presales, etl_dda, etl_rvp, etl_pipeline, etl_pipeline_exploded
-            for mod in [etl_fx, etl_targets, etl_vat, etl_melody, etl_presales, etl_dda, etl_rvp, etl_pipeline, etl_pipeline_exploded]:
+            import etl_fx, etl_targets, etl_vat, etl_melody, etl_presales, etl_dda, etl_rvp, etl_progression, etl_pipeline, etl_pipeline_exploded
+            for mod in [etl_fx, etl_targets, etl_vat, etl_melody, etl_presales, etl_dda, etl_rvp, etl_progression, etl_pipeline, etl_pipeline_exploded]:
                 importlib.reload(mod)
             steps = [
                 ("fx",                 etl_fx.run,                   {}),
@@ -316,6 +330,7 @@ def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_k
                 ("presales",           etl_presales.run,             {}),
                 ("dda",                etl_dda.run,                  {}),
                 ("rvp",                etl_rvp.run,                  {}),
+                ("progression",        etl_progression.run,          {}),
                 ("pipeline",           etl_pipeline.run,             {"last_week": False}),
                 ("pipeline_exploded",  etl_pipeline_exploded.run,    {}),
             ]
@@ -327,7 +342,39 @@ def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_k
                 _log(f"  ✓ {step_name}: {result}  ({elapsed:.1f}s)")
                 if isinstance(result, int):
                     total_rows += result
+
+        elif source_id in multi_file_sources and len(saved_paths) > 1:
+            # Multi-file incremental load — uses run_multi to avoid external merge
+            import importlib, etl_pipeline
+            importlib.reload(etl_pipeline)
+            last_week = (source_id == "pipeline_lw")
+            _log(f"Carregando {len(saved_paths)} arquivo(s) incrementalmente …")
+            t0 = time.time()
+            result = etl_pipeline.run_multi(saved_paths, last_week=last_week)
+            elapsed = time.time() - t0
+            _log(f"✓ run_multi: {result}  ({elapsed:.1f}s)")
+            total_rows += sum(v for v in result.values() if isinstance(v, int))
+
+            if source_id == "pipeline":
+                import etl_pipeline_exploded
+                importlib.reload(etl_pipeline_exploded)
+                _log("Executando etl_pipeline_exploded …")
+                t0 = time.time()
+                n = etl_pipeline_exploded.run()
+                elapsed = time.time() - t0
+                _log(f"✓ etl_pipeline_exploded: {n}  ({elapsed:.1f}s)")
+
         else:
+            # Single-file path: copy to config location then run as before
+            if saved_paths and file_key:
+                import config
+                dest = config.FILES[file_key]
+                saved_path = saved_paths[0]
+                _log(f"Copiando arquivo para {dest.name} …")
+                shutil.copy2(saved_path, dest)
+                _log(f"Arquivo salvo ({saved_path.stat().st_size / 1024:.0f} KB)")
+                saved_path.unlink(missing_ok=True)
+
             import importlib
             kwargs_map = src.get("etl_kwargs", {})
             for etl_name in src["etls"]:
@@ -343,6 +390,14 @@ def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_k
                     total_rows += result
                 elif isinstance(result, dict):
                     total_rows += sum(v for v in result.values() if isinstance(v, int))
+
+        # Clean up any remaining temp files
+        for p in saved_paths:
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
 
         _log(f"\n✅ Concluído — {total_rows} linhas processadas")
         with _lock:
@@ -371,11 +426,12 @@ def _run_etl_job(job_id: str, source_id: str, saved_path: Optional[Path], file_k
 async def run_etl(
     source_id: str,
     background_tasks: BackgroundTasks,
-    file: Optional[UploadFile] = File(default=None),
+    files: List[UploadFile] = File(default=[]),
     _user=Depends(verify_token),
 ):
     """
-    Upload a file (optional) and trigger the ETL for source_id.
+    Upload one or more files and trigger the ETL for source_id.
+    For pipeline sources, multiple files are loaded incrementally (no external merge needed).
     Returns a job_id immediately; poll /api/etl/jobs/{job_id} for status.
     """
     src = next((s for s in SOURCES if s["id"] == source_id), None)
@@ -383,19 +439,19 @@ async def run_etl(
         raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
 
     file_key = src.get("file_key")
-    saved_path: Optional[Path] = None
+    saved_paths: List[Path] = []
 
-    if file and file.filename:
-        # Save uploaded file to a temp location inside ETL_DIR
-        tmp = ETL_DIR / f"_upload_{source_id}_{_job_id()}{Path(file.filename).suffix}"
-        contents = await file.read()
-        tmp.write_bytes(contents)
-        saved_path = tmp
+    valid_files = [f for f in files if f and f.filename]
+    if valid_files:
+        for f in valid_files:
+            tmp = ETL_DIR / f"_upload_{source_id}_{_job_id()}{Path(f.filename).suffix}"
+            contents = await f.read()
+            tmp.write_bytes(contents)
+            saved_paths.append(tmp)
     elif file_key and source_id != "full_run":
         # No file uploaded — use the existing file on disk
-        import sys as _sys
-        if str(ETL_DIR) not in _sys.path:
-            _sys.path.insert(0, str(ETL_DIR))
+        if str(ETL_DIR) not in sys.path:
+            sys.path.insert(0, str(ETL_DIR))
         import config
         existing = config.FILES.get(file_key)
         if not existing or not Path(existing).exists():
@@ -405,19 +461,21 @@ async def run_etl(
             )
 
     job_id = _job_id()
+    file_count = len(saved_paths)
+    label = src["label"] + (f" ({file_count} arquivo(s))" if file_count > 1 else "")
     with _lock:
         _jobs[job_id] = {
             "id": job_id,
             "source_id": source_id,
-            "name": src["label"],
+            "name": label,
             "status": "running",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
             "rows": 0,
             "error": None,
-            "log": f"[{datetime.now().strftime('%H:%M:%S')}] Iniciando {src['label']} …\n",
+            "log": f"[{datetime.now().strftime('%H:%M:%S')}] Iniciando {label} …\n",
         }
-        _persist_job(_jobs[job_id])   # record start so history survives restarts
+        _persist_job(_jobs[job_id])
 
-    background_tasks.add_task(_run_etl_job, job_id, source_id, saved_path, file_key)
+    background_tasks.add_task(_run_etl_job, job_id, source_id, saved_paths, file_key)
     return {"job_id": job_id, "status": "running"}

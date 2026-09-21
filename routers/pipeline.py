@@ -39,6 +39,9 @@ def _build_where(
     digital_sas=None,
     channel_partners=None,
     presales_statuses=None,  # multi-value: ['Red','Yellow','Green']
+    # SPEC filters (join on account_specs via account_bp)
+    iaes=None, spec_cxs=None, spec_hxms=None, spec_procurements=None,
+    spec_dscs=None, spec_btps=None, spec_bdcs=None, spec_fins=None, spec_pros=None,
 ) -> tuple[str, list]:
     clauses, params = [], []
 
@@ -110,6 +113,29 @@ def _build_where(
         clauses.append("(LOWER(opportunity_id) LIKE %s OR LOWER(account_name) LIKE %s OR LOWER(opp_owner_name) LIKE %s OR LOWER(opp_description) LIKE %s)")
         like = f"%{search.lower()}%"
         params.extend([like, like, like, like])
+
+    # SPEC filters — subquery on account_specs via account_bp
+    def _spec_filter(col, vals):
+        if not vals:
+            return
+        v = [x for x in vals if x]
+        if not v:
+            return
+        ph = ",".join(["%s"] * len(v))
+        clauses.append(
+            f"account_bp IN (SELECT account_bp FROM account_specs WHERE {col} IN ({ph}))"
+        )
+        params.extend(v)
+
+    _spec_filter("iae",              iaes or [])
+    _spec_filter("spec_cx",          spec_cxs or [])
+    _spec_filter("spec_hxm",         spec_hxms or [])
+    _spec_filter("spec_procurement",  spec_procurements or [])
+    _spec_filter("spec_dsc",         spec_dscs or [])
+    _spec_filter("spec_btp",         spec_btps or [])
+    _spec_filter("spec_bdc",         spec_bdcs or [])
+    _spec_filter("spec_fin",         spec_fins or [])
+    _spec_filter("spec_pro",         spec_pros or [])
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return where, params
@@ -353,6 +379,15 @@ def pipeline_filter_options(_user=Depends(verify_token)):
         rows = query(f"SELECT DISTINCT {col} AS v FROM pipeline WHERE snapshot_week = {SNAP} AND {col} IS NOT NULL ORDER BY {col}")
         return [r["v"] for r in rows if r["v"] is not None and r["v"] not in HEADER_ARTIFACTS]
 
+    def _spec_col(col):
+        rows = query(
+            f"SELECT DISTINCT s.{col} AS v FROM account_specs s"
+            f" INNER JOIN pipeline p ON p.account_bp = s.account_bp"
+            f" WHERE p.snapshot_week = {SNAP} AND s.{col} IS NOT NULL"
+            f" ORDER BY s.{col}"
+        )
+        return [r["v"] for r in rows if r["v"]]
+
     return {
         "closing_qtrs":      _col("closing_qtr"),
         "regions":           _col("region_lvl3"),
@@ -373,6 +408,16 @@ def pipeline_filter_options(_user=Depends(verify_token)):
         "acc_sub_segments":  _col("account_planned_archetype_text"),
         "sde_owners":        _col("sde_current_territory_owner"),
         "digital_sas":       _col("vat_dh"),
+        # SPEC filters — from account_specs table via pipeline account_bp
+        "iaes":              _spec_col("iae"),
+        "spec_cxs":          _spec_col("spec_cx"),
+        "spec_hxms":         _spec_col("spec_hxm"),
+        "spec_procurements": _spec_col("spec_procurement"),
+        "spec_dscs":         _spec_col("spec_dsc"),
+        "spec_btps":         _spec_col("spec_btp"),
+        "spec_bdcs":         _spec_col("spec_bdc"),
+        "spec_fins":         _spec_col("spec_fin"),
+        "spec_pros":         _spec_col("spec_pro"),
     }
 
 
@@ -552,8 +597,21 @@ def get_pipeline(
     dda_statuses: List[str] = Query(default=[]),
     range_agings: List[str] = Query(default=[]),
     deal_type: Optional[str] = None,   # 'single' | 'basket' | None
+    priorities: List[int] = Query(default=[]),
+    probability_min: Optional[float] = None,
+    probability_max: Optional[float] = None,
     deduplicate: bool = True,
     limit: int = Query(default=5000, le=20000),
+    # SPEC filters
+    iaes: List[str] = Query(default=[]),
+    spec_cxs: List[str] = Query(default=[]),
+    spec_hxms: List[str] = Query(default=[]),
+    spec_procurements: List[str] = Query(default=[]),
+    spec_dscs: List[str] = Query(default=[]),
+    spec_btps: List[str] = Query(default=[]),
+    spec_bdcs: List[str] = Query(default=[]),
+    spec_fins: List[str] = Query(default=[]),
+    spec_pros: List[str] = Query(default=[]),
     _user=Depends(verify_token),
 ):
     where, params = _build_where(
@@ -570,6 +628,9 @@ def get_pipeline(
         local_owners=local_owners, acc_sub_segments=acc_sub_segments,
         channel_partners=channel_partners,
         presales_statuses=presales_statuses,
+        iaes=iaes, spec_cxs=spec_cxs, spec_hxms=spec_hxms, spec_procurements=spec_procurements,
+        spec_dscs=spec_dscs, spec_btps=spec_btps, spec_bdcs=spec_bdcs,
+        spec_fins=spec_fins, spec_pros=spec_pros,
     )
     # Add DDA filters via subquery
     if dda_statuses:
@@ -580,6 +641,16 @@ def get_pipeline(
         ph = ",".join(["%s"] * len(range_agings))
         where = (where + " AND " if where else "WHERE ") + f"opportunity_id IN (SELECT opp_id FROM dda WHERE range_aging IN ({ph}))"
         params.extend(range_agings)
+    if priorities:
+        ph = ",".join(["%s"] * len(priorities))
+        where = (where + " AND " if where else "WHERE ") + f"opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE priority IN ({ph}))"
+        params.extend([int(p) for p in priorities])
+    if probability_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE probability_pct >= %s)"
+        params.append(float(probability_min))
+    if probability_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE probability_pct <= %s)"
+        params.append(float(probability_max))
     where = _apply_deal_type(where, deal_type)
     if deduplicate:
         # Pivot ACV by Solution L1 in a single pass alongside the deduplicated row
@@ -627,10 +698,15 @@ def get_pipeline(
             SELECT b.*, lp.acv_l1_baip_dai, lp.acv_l1_baip_tf, lp.acv_l1_btm,
                    lp.acv_l1_cloud_erp, lp.acv_l1_cx, lp.acv_l1_finance,
                    lp.acv_l1_hcm, lp.acv_l1_scm, lp.acv_l1_other,
-                   ps.presales_lead_status
+                   ps.presales_lead_status,
+                   op.priority_t1, op.priority, op.probability_pct,
+                   sp.iae, sp.spec_cx, sp.spec_hxm, sp.spec_procurement,
+                   sp.spec_dsc, sp.spec_btp, sp.spec_bdc, sp.spec_fin, sp.spec_pro
             FROM base b
             LEFT JOIN lob_pivot lp ON lp.opportunity_id = b.opportunity_id
             LEFT JOIN presales ps ON ps.opp_id = LPAD(b.opportunity_id, 10, '0')
+            LEFT JOIN opportunity_priorities op ON op.opportunity_id = b.opportunity_id
+            LEFT JOIN account_specs sp ON sp.account_bp = b.account_bp
             ORDER BY b.acv_total_opp DESC
             LIMIT {int(limit)}
         """
@@ -653,10 +729,13 @@ def get_pipeline(
                 p.sic_description,
                 p.sap_mastercode,
                 p.account_bp,
-                TO_NVARCHAR(p.snapshot_week, 'YYYY-MM-DD')
+                TO_NVARCHAR(p.snapshot_week, 'YYYY-MM-DD'),
+                sp.iae, sp.spec_cx, sp.spec_hxm, sp.spec_procurement,
+                sp.spec_dsc, sp.spec_btp, sp.spec_bdc, sp.spec_fin, sp.spec_pro
             FROM pipeline p
             LEFT JOIN dda d ON d.opp_id = p.opportunity_id
             LEFT JOIN presales ps ON ps.opp_id = LPAD(p.opportunity_id, 10, '0')
+            LEFT JOIN account_specs sp ON sp.account_bp = p.account_bp
             {where}
             ORDER BY p.acv_total_opp DESC
             LIMIT {int(limit)}
@@ -722,6 +801,102 @@ def get_new_bookings(
         ORDER BY p.opportunity_id, p.acv_total_opp DESC
     """
     return query(sql, extra_params or None)
+
+
+@router.get("/bookings/filters")
+def get_bookings_filters(_user=Depends(verify_token)):
+    """Filter options for the Bookings congratulations dashboard — HANA-compatible separate queries."""
+    SNAP = "(SELECT MAX(snapshot_week) FROM pipeline)"
+    BASE = f"snapshot_week = {SNAP} AND drm_category = 'Booked/Won'"
+
+    def _col(col):
+        rows = query(
+            f"SELECT DISTINCT {col} AS v FROM pipeline WHERE {BASE} AND {col} IS NOT NULL ORDER BY {col}"
+        )
+        return [r["v"] for r in rows if r["v"]]
+
+    dsa_rows = query("SELECT DISTINCT nombre_empleado AS v FROM targets WHERE nombre_empleado IS NOT NULL ORDER BY nombre_empleado")
+    team_rows = query("SELECT DISTINCT area AS v FROM targets WHERE area IS NOT NULL ORDER BY area")
+
+    return {
+        "closing_qtrs": _col("closing_qtr"),
+        "regions":      _col("region_lvl3"),
+        "sol_l1s":      _col("solution_area_l1"),
+        "sol_l2s":      _col("sub_solution_area_l2"),
+        "dsas":         [r["v"] for r in dsa_rows if r["v"]],
+        "dvas":         [],
+        "teams":        [r["v"] for r in team_rows if r["v"]],
+    }
+
+
+@router.get("/bookings")
+def get_bookings(
+    closing_qtrs: List[str] = Query(default=[]),
+    regions:      List[str] = Query(default=[]),
+    sol_l1s:      List[str] = Query(default=[]),
+    sol_l2s:      List[str] = Query(default=[]),
+    dsas:         List[str] = Query(default=[]),
+    dvas:         List[str] = Query(default=[]),
+    teams:        List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    """Booked/Won opportunities with full VAT team info for the congratulations dashboard."""
+    clauses = [
+        "snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)",
+        "drm_category = 'Booked/Won'",
+    ]
+    params: list = []
+    if closing_qtrs:
+        ph = ",".join(["%s"] * len(closing_qtrs))
+        clauses.append(f"closing_qtr IN ({ph})")
+        params.extend(closing_qtrs)
+    if regions:
+        ph = ",".join(["%s"] * len(regions))
+        clauses.append(f"region_lvl3 IN ({ph})")
+        params.extend(regions)
+    if sol_l1s:
+        ph = ",".join(["%s"] * len(sol_l1s))
+        clauses.append(f"solution_area_l1 IN ({ph})")
+        params.extend(sol_l1s)
+    if sol_l2s:
+        ph = ",".join(["%s"] * len(sol_l2s))
+        clauses.append(f"sub_solution_area_l2 IN ({ph})")
+        params.extend(sol_l2s)
+    if dsas:
+        or_c = " OR ".join(["vat_dh ILIKE %s"] * len(dsas))
+        clauses.append(f"({or_c})")
+        params.extend([f"%{v}%" for v in dsas])
+    if teams:
+        ph = ",".join(["%s"] * len(teams))
+        clauses.append(f"""
+            opportunity_id IN (
+                SELECT DISTINCT pe.opportunity_id
+                FROM pipeline_exploded pe
+                JOIN targets t ON t.inumber = pe.sa_inumber
+                WHERE pe.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline_exploded)
+                  AND t.area IN ({ph})
+            )
+        """)
+        params.extend(teams)
+    where = " AND ".join(clauses)
+    sql = f"""
+        SELECT DISTINCT ON (opportunity_id)
+            opportunity_id, account_name, opp_description,
+            region_lvl3, solution_area_l1, sub_solution_area_l2,
+            closing_date, closing_qtr,
+            acv_total_opp,
+            opp_owner_name,
+            vat_dh, vat_full,
+            sde_primary_engagement_name,
+            sde_current_territory_owner,
+            flsm
+        FROM pipeline
+        WHERE {where}
+        ORDER BY opportunity_id, acv_total_opp DESC
+    """
+    rows = query(sql, params or None)
+    rows.sort(key=lambda r: r.get("closing_date") or "", reverse=True)
+    return rows
 
 
 @router.get("/prev")

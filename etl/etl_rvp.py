@@ -10,6 +10,82 @@ log = get_logger("etl.rvp")
 
 _BOOL_COLS = {"R2Q_Flag", "R4Q_Flag", "Included_in_TCP"}
 
+_CREATE_DDL = """
+CREATE TABLE "RVP" (
+    OPPORTUNITY_ID           NVARCHAR(50)   NOT NULL PRIMARY KEY,
+    ACCOUNT_ID               NVARCHAR(50),
+    CRM_ACCOUNT_LABEL        NVARCHAR(300),
+    PROBABILITY_PCT          DECIMAL(5,2),
+    GLOBAL_RANK              INTEGER,
+    TIER                     NVARCHAR(20),
+    FOCUS                    NVARCHAR(50),
+    PLANNING_ENTITY          NVARCHAR(200),
+    PLANNING_ENTITY_ID       NVARCHAR(50),
+    URL                      NVARCHAR(1000),
+    REGION                   NVARCHAR(100),
+    REGION_L2                NVARCHAR(100),
+    REGION_L3                NVARCHAR(100),
+    REGION_L4                NVARCHAR(100),
+    REGION_L5                NVARCHAR(100),
+    OPPORTUNITY_DESCRIPTION  NVARCHAR(2000),
+    CREATE_DATE              DATE,
+    AGE                      INTEGER,
+    ACCOUNT_OWNER            NVARCHAR(200),
+    OPPORTUNITY_SOURCE       NVARCHAR(200),
+    DISTRIBUTION_CHANNEL     NVARCHAR(100),
+    OPPORTUNITY_ORIGIN       NVARCHAR(100),
+    CHANNEL_PARTNER          NVARCHAR(300),
+    CHANNEL_PARTNER_ID       NVARCHAR(50),
+    INTERNAL_MARKET_SEGMENT  NVARCHAR(100),
+    INDUSTRY_MASTERCODE      NVARCHAR(100),
+    MASTERCODE_LABEL         NVARCHAR(200),
+    RATING_DATE              DATE,
+    EXPECTED_REVENUE_DATE    DATE,
+    EXPECTED_REVENUE_QUARTER NVARCHAR(20),
+    EXPECTED_REVENUE_YEAR    INTEGER,
+    R2Q_FLAG                 BOOLEAN,
+    R4Q_FLAG                 BOOLEAN,
+    SALES_PHASE              NVARCHAR(100),
+    SALES_PHASE_AGE          INTEGER,
+    SALES_PHASE_AGE_RANGE    NVARCHAR(50),
+    INTERNAL_SALES_SEGMENT   NVARCHAR(100),
+    INTERNAL_ACCOUNT_CLASS   NVARCHAR(200),
+    BUYING_LIFECYCLE         NVARCHAR(100),
+    FORECAST_QUALIFICATION   NVARCHAR(100),
+    SLIP_NUMBER              INTEGER,
+    MINO_INTERACTIONS        INTEGER,
+    MAEO_INTERACTIONS        INTEGER,
+    NOMINAL_VALUE            DECIMAL(18,2),
+    INCLUDED_IN_TCP          BOOLEAN,
+    TCP_VALUE                DECIMAL(18,2),
+    RPV                      DECIMAL(18,2),
+    REGION_RANK              INTEGER,
+    VP_RANK                  INTEGER,
+    ISS_RANK                 INTEGER,
+    IMS_RANK                 INTEGER,
+    SOURCE_RANK              INTEGER,
+    L2_BTP                   DECIMAL(10,4),
+    L2_BTM                   DECIMAL(10,4),
+    L2_CLOUD_ERP_PRIVATE     DECIMAL(10,4),
+    L2_CX                    DECIMAL(10,4),
+    L2_DATA_AI               DECIMAL(10,4),
+    L2_FSM                   DECIMAL(10,4),
+    L2_HCM                   DECIMAL(10,4),
+    L2_OTHER                 DECIMAL(10,4),
+    L2_SCM                   DECIMAL(10,4)
+)
+"""
+
+
+def _ensure_table(conn):
+    cur = conn.cursor()
+    try:
+        cur.execute(_CREATE_DDL)
+        conn.commit()
+        log.info("rvp: table created")
+    except Exception:
+        pass  # already exists
+
 
 def _to_bool(val) -> bool | None:
     if val is None:
@@ -97,6 +173,7 @@ def run() -> int:
         })
 
     with get_conn() as conn:
+        _ensure_table(conn)
         truncate(conn, "rvp")
         n = upsert(conn, "rvp", rows, ["opportunity_id"])
 

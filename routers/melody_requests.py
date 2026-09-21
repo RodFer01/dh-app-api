@@ -53,6 +53,8 @@ def get_requests(
     sub_statuses: List[str] = Query(default=[]),
     action_takens: List[str] = Query(default=[]),
     lob_teams: List[str] = Query(default=[]),
+    engagement_statuses: List[str] = Query(default=[]),
+    solutions: List[str] = Query(default=[]),
     # Date range filters
     create_date_from: Optional[str] = Query(default=None),   # YYYY-MM-DD
     create_date_to:   Optional[str] = Query(default=None),
@@ -100,11 +102,33 @@ def get_requests(
         params.extend([f"%{p}%" for p in processors])
 
     add_in("sub_status", sub_statuses)
+    add_in("req_solution", solutions)
+
+    if engagement_statuses:
+        has_none = "(Sem engagement)" in engagement_statuses
+        real_vals = [v for v in engagement_statuses if v != "(Sem engagement)"]
+        if has_none and real_vals:
+            ph = ",".join(["%s"] * len(real_vals))
+            clauses.append(f"(es.engagement_status IN ({ph}) OR es.engagement_status IS NULL)")
+            params.extend(real_vals)
+        elif has_none:
+            clauses.append("es.engagement_status IS NULL")
+        else:
+            ph = ",".join(["%s"] * len(real_vals))
+            clauses.append(f"es.engagement_status IN ({ph})")
+            params.extend(real_vals)
 
     if search:
-        clauses.append("(req_id_sub ILIKE %s OR req_id_main ILIKE %s OR opportunity_id ILIKE %s OR acct_name ILIKE %s)")
+        search_fields = [
+            "r.req_id_sub", "r.opportunity_id", "r.acct_name",
+            "r.requestor", "r.req_resource", "r.req_processor", "r.req_task_owner",
+            "r.req_task_owner_role", "r.req_role_area", "r.req_profit_center",
+            "r.req_type", "r.req_status", "r.req_status_main", "r.sub_status",
+            "r.req_task", "r.req_task_action_taken",
+        ]
+        clauses.append("(" + " OR ".join(f"{f} ILIKE %s" for f in search_fields) + ")")
         like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.extend([like] * len(search_fields))
 
     if create_date_from:
         clauses.append("req_create_date >= %s"); params.append(create_date_from)
@@ -120,7 +144,7 @@ def get_requests(
         SELECT r.req_id_sub, r.req_type, r.req_status_main, r.req_status, r.sub_status,
                r.opportunity_id, r.acct_name, r.requestor, r.req_resource,
                r.req_role_area, r.req_profit_center, r.req_task_owner, r.req_task_owner_role,
-               r.req_processor,
+               r.req_processor, r.req_solution,
                TO_NVARCHAR(r.req_create_date, 'YYYY-MM-DD') AS req_create_date,
                TO_NVARCHAR(r.req_last_action_date, 'YYYY-MM-DD') AS req_last_action_date,
                r.req_task, r.req_task_action_taken,
@@ -133,7 +157,7 @@ def get_requests(
         GROUP BY r.req_id_sub, r.req_type, r.req_status_main, r.req_status, r.sub_status,
                  r.opportunity_id, r.acct_name, r.requestor, r.req_resource,
                  r.req_role_area, r.req_profit_center,
-                 r.req_task_owner, r.req_task_owner_role, r.req_processor,
+                 r.req_task_owner, r.req_task_owner_role, r.req_processor, r.req_solution,
                  r.req_create_date, r.req_last_action_date, r.req_task, r.req_task_action_taken,
                  es.engagement_status
         ORDER BY r.req_create_date DESC
@@ -163,7 +187,7 @@ def get_requests(
 @router.get("/filters")
 def get_filters(_user=Depends(verify_token)):
     array_col_names = ['statuses','req_types','role_areas','requestors','resources',
-                       'profit_centers','task_owners','processors','sub_statuses','action_takens']
+                       'profit_centers','task_owners','processors','sub_statuses','action_takens','solutions']
     row = query_one("""
         SELECT
             array_agg(DISTINCT req_status_main   ORDER BY req_status_main)   AS statuses,
@@ -175,7 +199,8 @@ def get_filters(_user=Depends(verify_token)):
             array_agg(DISTINCT req_task_owner      ORDER BY req_task_owner)       AS task_owners,
             array_agg(DISTINCT req_processor       ORDER BY req_processor)         AS processors,
             array_agg(DISTINCT sub_status          ORDER BY sub_status)            AS sub_statuses,
-            array_agg(DISTINCT req_task_action_taken ORDER BY req_task_action_taken) AS action_takens
+            array_agg(DISTINCT req_task_action_taken ORDER BY req_task_action_taken) AS action_takens,
+            array_agg(DISTINCT req_solution        ORDER BY req_solution)          AS solutions
         FROM melody_requests
     """, array_cols=array_col_names) or {}
     result = {k: [v for v in (arr if isinstance(arr, list) else []) if v is not None] for k, arr in row.items()}
@@ -196,6 +221,12 @@ def get_filters(_user=Depends(verify_token)):
         "SELECT DISTINCT sub_team FROM targets WHERE sub_team IS NOT NULL ORDER BY sub_team"
     )
     result["lob_teams"] = [r["sub_team"] for r in lob_rows]
+
+    # Engagement statuses from mr_engagement_status table
+    eng_rows = query(
+        "SELECT DISTINCT engagement_status FROM mr_engagement_status WHERE engagement_status IS NOT NULL ORDER BY engagement_status"
+    )
+    result["engagement_statuses"] = ["(Sem engagement)"] + [r["engagement_status"] for r in eng_rows]
 
     return result
 

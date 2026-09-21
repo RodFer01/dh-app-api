@@ -34,6 +34,14 @@ def create_token(email: str, name: str, role: str = "viewer", modules: list = No
     return jwt.encode(payload, _SECRET_KEY, algorithm=_ALGORITHM)
 
 
+def decode_token_email(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     try:
         payload = jwt.decode(credentials.credentials, _SECRET_KEY, algorithms=[_ALGORITHM])

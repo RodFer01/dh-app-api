@@ -1,6 +1,6 @@
 """Spark Meeting sessions + FX rates router."""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "presales-pipeline-app"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from typing import Optional
 from fastapi import APIRouter, Depends

@@ -75,7 +75,8 @@ def upsert(conn, table: str, rows: list[dict], conflict_cols: list[str]) -> int:
 
     col_str = ", ".join(c.upper() for c in cols)
     ph      = ", ".join("?" for _ in cols)
-    sql     = f"INSERT INTO {table} ({col_str}) VALUES ({ph})"
+    tname   = table.strip('"').upper()
+    sql     = f'INSERT INTO "{tname}" ({col_str}) VALUES ({ph})'
 
     cur2 = conn.cursor()
     for i in range(0, len(rows), 500):
@@ -141,7 +142,8 @@ def clean_date(val: Any) -> date | None:
 def truncate(conn, table: str):
     """TRUNCATE a table — HANA cursor is not a context manager so we handle it directly."""
     cur = conn.cursor()
-    cur.execute(f"TRUNCATE TABLE {table}")
+    name = table.strip('"').upper()
+    cur.execute(f'TRUNCATE TABLE "{name}"')
 
 
 def execute_sql(conn, sql: str, params=None):

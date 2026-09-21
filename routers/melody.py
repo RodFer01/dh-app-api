@@ -274,6 +274,126 @@ def vat_gaps_summary(
     return dict(r) if r else {}
 
 
+@router.get("/vat-role-mismatch")
+def vat_role_mismatch(
+    drm_categories: list = Query(default=[]),
+    digital_sa: str = Query(default=""),
+    team: str = Query(default=""),
+    _user=Depends(verify_token),
+):
+    """DH SAs in dh_vat whose sales_team_role is not 'Digital Solution Advisor'."""
+    clauses = [
+        "(v.sales_team_role IS NULL OR LOWER(v.sales_team_role) != 'digital solution advisor')",
+    ]
+    params: list = []
+
+    if drm_categories:
+        ph = ",".join(["%s"] * len(drm_categories))
+        clauses.append(f"p.drm_category IN ({ph})")
+        params.extend(drm_categories)
+
+    if digital_sa:
+        clauses.append("v.sales_team_member_name ILIKE %s")
+        params.append(f"%{digital_sa}%")
+
+    if team:
+        clauses.append("t.area = %s")
+        params.append(team)
+
+    where = "WHERE " + " AND ".join(clauses)
+
+    rows = query(f"""
+        SELECT
+            v.sales_team_member_id,
+            v.sales_team_member_name,
+            v.sales_team_role,
+            t.area          AS sa_team,
+            t.sub_team,
+            v.opportunity_id,
+            p.account_name,
+            p.opp_owner_name,
+            p.solution_area_l1,
+            p.closing_qtr,
+            p.opp_phase,
+            p.drm_category,
+            p.engagement_type,
+            p.acv_total_opp,
+            p.region_lvl3,
+            p.flsm
+        FROM full_vat v
+        JOIN targets t ON t.inumber = v.sales_team_member_id
+        JOIN (
+            SELECT opportunity_id, account_name, opp_owner_name, solution_area_l1,
+                   closing_qtr, opp_phase, drm_category, engagement_type,
+                   acv_total_opp, region_lvl3, flsm
+            FROM (
+                SELECT opportunity_id, account_name, opp_owner_name, solution_area_l1,
+                       closing_qtr, opp_phase, drm_category, engagement_type,
+                       acv_total_opp, region_lvl3, flsm,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS _rn
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND drm_category NOT IN ('Disc/Lost')
+            ) _pp WHERE _rn = 1
+        ) p ON p.opportunity_id = v.opportunity_id
+        {where}
+        ORDER BY p.acv_total_opp DESC
+        LIMIT 5000
+    """, params or None)
+
+    return [dict(r) for r in rows]
+
+
+@router.get("/vat-role-mismatch/summary")
+def vat_role_mismatch_summary(
+    drm_categories: list = Query(default=[]),
+    digital_sa: str = Query(default=""),
+    team: str = Query(default=""),
+    _user=Depends(verify_token),
+):
+    """Counts for role mismatch — total SA-opp pairs, distinct opps, distinct SAs."""
+    clauses = [
+        "(v.sales_team_role IS NULL OR LOWER(v.sales_team_role) != 'digital solution advisor')",
+    ]
+    params: list = []
+
+    if drm_categories:
+        ph = ",".join(["%s"] * len(drm_categories))
+        clauses.append(f"p.drm_category IN ({ph})")
+        params.extend(drm_categories)
+
+    if digital_sa:
+        clauses.append("v.sales_team_member_name ILIKE %s")
+        params.append(f"%{digital_sa}%")
+
+    if team:
+        clauses.append("t.area = %s")
+        params.append(team)
+
+    where = "WHERE " + " AND ".join(clauses)
+
+    r = query_one(f"""
+        SELECT
+            COUNT(*)                                AS total_mismatches,
+            COUNT(DISTINCT v.opportunity_id)        AS distinct_opps,
+            COUNT(DISTINCT v.sales_team_member_id)  AS distinct_sas
+        FROM full_vat v
+        JOIN targets t ON t.inumber = v.sales_team_member_id
+        JOIN (
+            SELECT opportunity_id, drm_category
+            FROM (
+                SELECT opportunity_id, drm_category,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS _rn
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND drm_category NOT IN ('Disc/Lost')
+            ) _pp WHERE _rn = 1
+        ) p ON p.opportunity_id = v.opportunity_id
+        {where}
+    """, params or None)
+    return dict(r) if r else {}
+
+
 @router.get("/by-opportunity/{opp_id}")
 def melody_by_opportunity(opp_id: str, _user=Depends(verify_token)):
     """Timeline of Melody activities for a specific opportunity."""
