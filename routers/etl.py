@@ -74,8 +74,9 @@ def _load_history_from_db() -> list[dict]:
         if IS_HANA:
             rows = query("""
                 SELECT TOP 50 job_id AS id, source_id, source_label AS name,
-                       status, TO_VARCHAR(started_at,'YYYY-MM-DDTHH24:MI:SSZ') AS started_at,
-                       TO_VARCHAR(finished_at,'YYYY-MM-DDTHH24:MI:SSZ') AS finished_at,
+                       status,
+                       TO_VARCHAR(started_at,'YYYY-MM-DD') || 'T' || TO_VARCHAR(started_at,'HH24:MI:SS') || 'Z' AS started_at,
+                       TO_VARCHAR(finished_at,'YYYY-MM-DD') || 'T' || TO_VARCHAR(finished_at,'HH24:MI:SS') || 'Z' AS finished_at,
                        rows_affected AS rows, error_msg AS error, log_text AS log
                 FROM etl_job_history
                 ORDER BY started_at DESC
@@ -147,7 +148,7 @@ SOURCES = [
         "desc":     "Sales Team VAT Report Data Analyzer_DH_2026.csv",
         "file_key": "dh_vat",
         "accept":   ".csv",
-        "etls":     ["etl_vat"],
+        "etls":     ["etl_vat", "etl_pipeline_exploded"],
         "etl_kwargs": {"etl_vat": {"only": "dh_vat"}},
     },
     {
@@ -240,6 +241,14 @@ SOURCES = [
         "accept":   ".csv",
         "etls":     ["etl_vat_2025"],
         "etl_kwargs": {"etl_vat_2025": {"only": "dh_vat_2025"}},
+    },
+    {
+        "id":       "outreach_contacts",
+        "label":    "Lead Intelligence (Outreach / Databricks)",
+        "desc":     "Busca contatos e lead scores do Databricks → OUTREACH_CONTACTS. Requer DATABRICKS_TOKEN válido.",
+        "file_key": None,
+        "accept":   None,
+        "etls":     ["etl_outreach_contacts"],
     },
     {
         "id":       "full_run",
@@ -343,7 +352,7 @@ def _run_etl_job(job_id: str, source_id: str, saved_paths: list[Path], file_key:
                 if isinstance(result, int):
                     total_rows += result
 
-        elif source_id in multi_file_sources and len(saved_paths) > 1:
+        elif source_id in multi_file_sources and len(saved_paths) >= 1:
             # Multi-file incremental load — uses run_multi to avoid external merge
             import importlib, etl_pipeline
             importlib.reload(etl_pipeline)

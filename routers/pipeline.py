@@ -2,8 +2,33 @@
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from database import query, query_one
+from database import query, query_one, execute, IS_HANA
 from auth import verify_token
+
+
+def _ensure_shadow_comments_table():
+    try:
+        execute("""
+            CREATE TABLE shadow_opp_comments (
+                closed_opp_id NVARCHAR(50) NOT NULL,
+                dh_opp_id     NVARCHAR(50) NOT NULL,
+                comment       NCLOB,
+                updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by    NVARCHAR(200),
+                PRIMARY KEY (closed_opp_id, dh_opp_id)
+            )
+        """)
+    except Exception:
+        pass
+    try:
+        execute("ALTER TABLE shadow_opp_comments ADD (corregir TINYINT DEFAULT 0)")
+    except Exception:
+        pass
+
+
+class ShadowComment(BaseModel):
+    comment: str = ""
+    corregir: int = 0
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -159,6 +184,31 @@ def _apply_deal_type(where: str, deal_type: Optional[str]) -> str:
     return (where + " AND " + subq) if where else ("WHERE " + subq)
 
 
+def _apply_fin_sub_type(where: str, fin_sub_type: Optional[str]) -> str:
+    """Filter to Finance deals matching a specific sub-type (procurement_only / fieldglass_only / mixed_finance)."""
+    if not fin_sub_type or fin_sub_type not in ('procurement_only', 'fieldglass_only', 'mixed_finance'):
+        return where
+    if fin_sub_type == 'procurement_only':
+        condition = "proc_lines = total_lines"
+    elif fin_sub_type == 'fieldglass_only':
+        condition = "fg_lines = total_lines"
+    else:
+        condition = "proc_lines < total_lines AND fg_lines < total_lines"
+    subq = f"""opportunity_id IN (
+        SELECT opportunity_id FROM (
+            SELECT opportunity_id,
+                   SUM(CASE WHEN sub_solution_area_l2 = 'Procurement' THEN 1 ELSE 0 END) AS proc_lines,
+                   SUM(CASE WHEN sub_solution_area_l2 = 'Fieldglass'  THEN 1 ELSE 0 END) AS fg_lines,
+                   COUNT(*) AS total_lines
+            FROM pipeline
+            WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND solution_area_l1 = 'Finance and Spend Management'
+            GROUP BY opportunity_id
+        ) _dt WHERE {condition}
+    )"""
+    return (where + " AND " + subq) if where else ("WHERE " + subq)
+
+
 @router.get("/kpis")
 def pipeline_kpis(
     snapshot_week: Optional[str] = None,
@@ -195,6 +245,10 @@ def pipeline_kpis(
     exclude_neg: bool = False,
     include_purchase: bool = False,
     deal_type: Optional[str] = None,
+    fin_sub_type: Optional[str] = None,
+    stall_days: int = 90,
+    acv_min: Optional[float] = None,
+    acv_max: Optional[float] = None,
     _user=Depends(verify_token),
 ):
     """Server-side KPI aggregation — handles all filtered rows, not capped by limit."""
@@ -213,6 +267,13 @@ def pipeline_kpis(
         presales_statuses=presales_statuses,
     )
     where = _apply_deal_type(where, deal_type)
+    where = _apply_fin_sub_type(where, fin_sub_type)
+    if acv_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
+        params.append(float(acv_min))
+    if acv_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp <= %s"
+        params.append(float(acv_max))
     neg_filter = "AND acv_usd > 0" if exclude_neg else ""
     # When include_purchase=True, treat opp_phase='A - Purchase' as Booked/Won
     purchase_expr = (
@@ -223,7 +284,7 @@ def pipeline_kpis(
         WITH lines AS (
             SELECT opportunity_id,
                    {purchase_expr}  AS drm_category,
-                   fc_qualification, engagement_type, acv_usd, age_days
+                   fc_qualification, engagement_type, acv_usd, age_days, phase_since_days
             FROM pipeline
             {where}
             {neg_filter}
@@ -260,7 +321,10 @@ def pipeline_kpis(
             COUNT(DISTINCT d.opportunity_id) FILTER (WHERE d.engagement_type = 'Digital')          AS n_digital,
             COUNT(DISTINCT d.opportunity_id) FILTER (WHERE d.age_days > 90
                               AND d.drm_category NOT IN ('Booked/Won','Disc/Lost',
-                                                        'Excluded from Pipeline'))  AS n_untouched
+                                                        'Excluded from Pipeline'))  AS n_untouched,
+            COALESCE(SUM(l.acv_usd) FILTER (WHERE l.drm_category NOT IN ('Booked/Won','Disc/Lost','Excluded from Pipeline')), 0)  AS active_pipeline_acv,
+            COALESCE(SUM(l.acv_usd) FILTER (WHERE l.drm_category NOT IN ('Booked/Won','Disc/Lost','Excluded from Pipeline')
+                              AND l.phase_since_days > {stall_days}), 0)  AS stalled_pipeline_acv
         FROM deduped_opps d
         JOIN lines l ON l.opportunity_id = d.opportunity_id
     """
@@ -299,6 +363,45 @@ class KpisByIdsPayload(BaseModel):
     opp_ids: list
     exclude_neg: bool = False
     include_purchase: bool = False
+
+
+class OppLinesRequest(BaseModel):
+    opp_ids: list
+
+
+@router.post("/bookings/opp-lines")
+def get_opp_lines(payload: OppLinesRequest, _user=Depends(verify_token)):
+    """Return line items (sol_l1, sol_l2, eng_name, acv) per opportunity from the latest snapshot."""
+    if not payload.opp_ids:
+        return {}
+    ph = ",".join(["%s"] * len(payload.opp_ids))
+    rows = query(
+        f"""
+        SELECT opportunity_id, solution_area_l1, sub_solution_area_l2,
+               sde_primary_engagement_name,
+               SUM(acv_usd) AS acv_usd
+        FROM pipeline
+        WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+          AND opportunity_id IN ({ph})
+          AND acv_usd > 0
+        GROUP BY opportunity_id, solution_area_l1, sub_solution_area_l2,
+                 sde_primary_engagement_name
+        ORDER BY opportunity_id, solution_area_l1, acv_usd DESC
+        """,
+        payload.opp_ids,
+    )
+    result = {}
+    for r in rows:
+        oid = r["opportunity_id"]
+        if oid not in result:
+            result[oid] = []
+        result[oid].append({
+            "sol_l1": r["solution_area_l1"] or "",
+            "sol_l2": r["sub_solution_area_l2"] or "",
+            "eng":    r["sde_primary_engagement_name"] or "",
+            "acv":    float(r["acv_usd"] or 0),
+        })
+    return result
 
 
 @router.post("/kpis-by-ids")
@@ -440,6 +543,27 @@ def l2_by_l1(
         sol_l1s,
     )
     return {"sol_l2s": [r["sub_solution_area_l2"] for r in rows if r["sub_solution_area_l2"]]}
+
+
+@router.get("/filters/local-owners-by-flsm")
+def local_owners_by_flsm(
+    flsms: List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    """Return distinct local_acct_owner values for the given FLSM(s)."""
+    if not flsms:
+        return {"local_owners": []}
+    ph = ",".join(["%s"] * len(flsms))
+    rows = query(
+        f"""SELECT DISTINCT local_acct_owner
+            FROM pipeline
+            WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND flsm IN ({ph})
+              AND local_acct_owner IS NOT NULL
+            ORDER BY local_acct_owner""",
+        flsms,
+    )
+    return {"local_owners": [r["local_acct_owner"] for r in rows if r["local_acct_owner"]]}
 
 
 @router.get("/dda-filters")
@@ -597,9 +721,12 @@ def get_pipeline(
     dda_statuses: List[str] = Query(default=[]),
     range_agings: List[str] = Query(default=[]),
     deal_type: Optional[str] = None,   # 'single' | 'basket' | None
+    fin_sub_type: Optional[str] = None,
     priorities: List[int] = Query(default=[]),
     probability_min: Optional[float] = None,
     probability_max: Optional[float] = None,
+    acv_min: Optional[float] = None,
+    acv_max: Optional[float] = None,
     deduplicate: bool = True,
     limit: int = Query(default=5000, le=20000),
     # SPEC filters
@@ -612,6 +739,7 @@ def get_pipeline(
     spec_bdcs: List[str] = Query(default=[]),
     spec_fins: List[str] = Query(default=[]),
     spec_pros: List[str] = Query(default=[]),
+    has_comment: bool = False,
     _user=Depends(verify_token),
 ):
     where, params = _build_where(
@@ -651,7 +779,16 @@ def get_pipeline(
     if probability_max is not None:
         where = (where + " AND " if where else "WHERE ") + "opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE probability_pct <= %s)"
         params.append(float(probability_max))
+    if acv_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
+        params.append(float(acv_min))
+    if acv_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp <= %s"
+        params.append(float(acv_max))
+    if has_comment:
+        where = (where + " AND " if where else "WHERE ") + "opportunity_id IN (SELECT DISTINCT opportunity_id FROM comments)"
     where = _apply_deal_type(where, deal_type)
+    where = _apply_fin_sub_type(where, fin_sub_type)
     if deduplicate:
         # Pivot ACV by Solution L1 in a single pass alongside the deduplicated row
         sql = f"""
@@ -701,12 +838,14 @@ def get_pipeline(
                    ps.presales_lead_status,
                    op.priority_t1, op.priority, op.probability_pct,
                    sp.iae, sp.spec_cx, sp.spec_hxm, sp.spec_procurement,
-                   sp.spec_dsc, sp.spec_btp, sp.spec_bdc, sp.spec_fin, sp.spec_pro
+                   sp.spec_dsc, sp.spec_btp, sp.spec_bdc, sp.spec_fin, sp.spec_pro,
+                   CASE WHEN cmt.opportunity_id IS NOT NULL THEN 1 ELSE 0 END AS has_comment
             FROM base b
             LEFT JOIN lob_pivot lp ON lp.opportunity_id = b.opportunity_id
             LEFT JOIN presales ps ON ps.opp_id = LPAD(b.opportunity_id, 10, '0')
             LEFT JOIN opportunity_priorities op ON op.opportunity_id = b.opportunity_id
             LEFT JOIN account_specs sp ON sp.account_bp = b.account_bp
+            LEFT JOIN (SELECT DISTINCT opportunity_id FROM comments) cmt ON cmt.opportunity_id = b.opportunity_id
             ORDER BY b.acv_total_opp DESC
             LIMIT {int(limit)}
         """
@@ -773,41 +912,85 @@ def get_new_bookings(
 
     extra_where = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
 
-    sql = f"""
-        SELECT DISTINCT ON (p.opportunity_id)
-            p.opportunity_id, p.account_name, p.opp_description, p.opp_owner_name,
-            p.region_lvl3, p.solution_area_l1, p.sub_solution_area_l2,
-            p.drm_category, p.opp_phase, p.closing_qtr, p.fc_qualification,
-            p.engagement_type, p.acv_usd, p.acv_total_opp,
-            p.vat_dh, p.vat_full, p.vat_size,
-            p.flsm, p.local_acct_owner, p.account_sales_group_text,
-            -- What was the previous status?
-            COALESCE(lw.drm_category, 'Not in previous snapshot') AS prev_drm_category,
-            COALESCE(lw.opp_phase, '—')                           AS prev_opp_phase
-        FROM pipeline p
-        LEFT JOIN (
-            SELECT DISTINCT ON (opportunity_id)
-                opportunity_id, drm_category, opp_phase
-            FROM pipeline_last_week
-            ORDER BY opportunity_id, acv_total_opp DESC
-        ) lw ON lw.opportunity_id = p.opportunity_id
-        WHERE p.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-          AND (p.drm_category = 'Booked/Won' OR p.opp_phase = 'A - Purchase')
-          AND (
-            lw.opportunity_id IS NULL
-            OR NOT (lw.drm_category = 'Booked/Won' OR lw.opp_phase = 'A - Purchase')
-          )
-          {extra_where}
-        ORDER BY p.opportunity_id, p.acv_total_opp DESC
-    """
+    if IS_HANA:
+        # _adapt_sql() can't handle nested DISTINCT ON (the rewriter finds the inner
+        # subquery's ORDER BY before the outer one, producing malformed SQL).
+        # Write ROW_NUMBER()-based SQL directly; _adapt_sql() still converts %s → ?.
+        sql = f"""
+            SELECT opportunity_id, account_name, opp_description, opp_owner_name,
+                   region_lvl3, solution_area_l1, sub_solution_area_l2,
+                   drm_category, opp_phase, closing_qtr, fc_qualification,
+                   engagement_type, acv_usd, acv_total_opp,
+                   vat_dh, vat_full, vat_size,
+                   flsm, local_acct_owner, account_sales_group_text,
+                   prev_drm_category, prev_opp_phase
+            FROM (
+                SELECT p.opportunity_id, p.account_name, p.opp_description, p.opp_owner_name,
+                       p.region_lvl3, p.solution_area_l1, p.sub_solution_area_l2,
+                       p.drm_category, p.opp_phase, p.closing_qtr, p.fc_qualification,
+                       p.engagement_type, p.acv_usd, p.acv_total_opp,
+                       p.vat_dh, p.vat_full, p.vat_size,
+                       p.flsm, p.local_acct_owner, p.account_sales_group_text,
+                       COALESCE(lw.drm_category, 'Not in previous snapshot') AS prev_drm_category,
+                       COALESCE(lw.opp_phase, '-') AS prev_opp_phase,
+                       ROW_NUMBER() OVER (PARTITION BY p.opportunity_id ORDER BY p.acv_total_opp DESC) AS _rn
+                FROM pipeline p
+                LEFT JOIN (
+                    SELECT opportunity_id, drm_category, opp_phase
+                    FROM (
+                        SELECT opportunity_id, drm_category, opp_phase,
+                               ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS _rn2
+                        FROM pipeline_last_week
+                    ) _lw_inner WHERE _rn2 = 1
+                ) lw ON lw.opportunity_id = p.opportunity_id
+                WHERE p.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND (p.drm_category = 'Booked/Won' OR p.opp_phase = 'A - Purchase')
+                  AND (
+                    lw.opportunity_id IS NULL
+                    OR NOT (lw.drm_category = 'Booked/Won' OR lw.opp_phase = 'A - Purchase')
+                  )
+                  {extra_where}
+            ) _outer WHERE _rn = 1
+        """
+    else:
+        sql = f"""
+            SELECT DISTINCT ON (p.opportunity_id)
+                p.opportunity_id, p.account_name, p.opp_description, p.opp_owner_name,
+                p.region_lvl3, p.solution_area_l1, p.sub_solution_area_l2,
+                p.drm_category, p.opp_phase, p.closing_qtr, p.fc_qualification,
+                p.engagement_type, p.acv_usd, p.acv_total_opp,
+                p.vat_dh, p.vat_full, p.vat_size,
+                p.flsm, p.local_acct_owner, p.account_sales_group_text,
+                -- What was the previous status?
+                COALESCE(lw.drm_category, 'Not in previous snapshot') AS prev_drm_category,
+                COALESCE(lw.opp_phase, '—')                           AS prev_opp_phase
+            FROM pipeline p
+            LEFT JOIN (
+                SELECT DISTINCT ON (opportunity_id)
+                    opportunity_id, drm_category, opp_phase
+                FROM pipeline_last_week
+                ORDER BY opportunity_id, acv_total_opp DESC
+            ) lw ON lw.opportunity_id = p.opportunity_id
+            WHERE p.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND (p.drm_category = 'Booked/Won' OR p.opp_phase = 'A - Purchase')
+              AND (
+                lw.opportunity_id IS NULL
+                OR NOT (lw.drm_category = 'Booked/Won' OR lw.opp_phase = 'A - Purchase')
+              )
+              {extra_where}
+            ORDER BY p.opportunity_id, p.acv_total_opp DESC
+        """
     return query(sql, extra_params or None)
 
 
 @router.get("/bookings/filters")
-def get_bookings_filters(_user=Depends(verify_token)):
+def get_bookings_filters(
+    flsms: List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
     """Filter options for the Bookings congratulations dashboard — HANA-compatible separate queries."""
     SNAP = "(SELECT MAX(snapshot_week) FROM pipeline)"
-    BASE = f"snapshot_week = {SNAP} AND drm_category = 'Booked/Won'"
+    BASE = f"snapshot_week = {SNAP} AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')"
 
     def _col(col):
         rows = query(
@@ -818,6 +1001,17 @@ def get_bookings_filters(_user=Depends(verify_token)):
     dsa_rows = query("SELECT DISTINCT nombre_empleado AS v FROM targets WHERE nombre_empleado IS NOT NULL ORDER BY nombre_empleado")
     team_rows = query("SELECT DISTINCT area AS v FROM targets WHERE area IS NOT NULL ORDER BY area")
 
+    if flsms:
+        ph = ",".join(["%s"] * len(flsms))
+        opp_rows = query(
+            f"SELECT DISTINCT opp_owner_name AS v FROM pipeline "
+            f"WHERE {BASE} AND opp_owner_name IS NOT NULL AND flsm IN ({ph}) ORDER BY opp_owner_name",
+            flsms,
+        )
+        opp_owners = [r["v"] for r in opp_rows if r["v"]]
+    else:
+        opp_owners = _col("opp_owner_name")
+
     return {
         "closing_qtrs": _col("closing_qtr"),
         "regions":      _col("region_lvl3"),
@@ -826,6 +1020,8 @@ def get_bookings_filters(_user=Depends(verify_token)):
         "dsas":         [r["v"] for r in dsa_rows if r["v"]],
         "dvas":         [],
         "teams":        [r["v"] for r in team_rows if r["v"]],
+        "flsms":        _col("flsm"),
+        "opp_owners":   opp_owners,
     }
 
 
@@ -838,36 +1034,38 @@ def get_bookings(
     dsas:         List[str] = Query(default=[]),
     dvas:         List[str] = Query(default=[]),
     teams:        List[str] = Query(default=[]),
+    flsms:        List[str] = Query(default=[]),
+    opp_owners:   List[str] = Query(default=[]),
     _user=Depends(verify_token),
 ):
     """Booked/Won opportunities with full VAT team info for the congratulations dashboard."""
     clauses = [
         "snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)",
-        "drm_category = 'Booked/Won'",
+        "(drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')",
     ]
     params: list = []
     if closing_qtrs:
-        ph = ",".join(["%s"] * len(closing_qtrs))
+        ph = ",".join(["?"] * len(closing_qtrs))
         clauses.append(f"closing_qtr IN ({ph})")
         params.extend(closing_qtrs)
     if regions:
-        ph = ",".join(["%s"] * len(regions))
+        ph = ",".join(["?"] * len(regions))
         clauses.append(f"region_lvl3 IN ({ph})")
         params.extend(regions)
     if sol_l1s:
-        ph = ",".join(["%s"] * len(sol_l1s))
+        ph = ",".join(["?"] * len(sol_l1s))
         clauses.append(f"solution_area_l1 IN ({ph})")
         params.extend(sol_l1s)
     if sol_l2s:
-        ph = ",".join(["%s"] * len(sol_l2s))
+        ph = ",".join(["?"] * len(sol_l2s))
         clauses.append(f"sub_solution_area_l2 IN ({ph})")
         params.extend(sol_l2s)
     if dsas:
-        or_c = " OR ".join(["vat_dh ILIKE %s"] * len(dsas))
+        or_c = " OR ".join(["UPPER(vat_dh) LIKE ?"] * len(dsas))
         clauses.append(f"({or_c})")
-        params.extend([f"%{v}%" for v in dsas])
+        params.extend([f"%{v.upper()}%" for v in dsas])
     if teams:
-        ph = ",".join(["%s"] * len(teams))
+        ph = ",".join(["?"] * len(teams))
         clauses.append(f"""
             opportunity_id IN (
                 SELECT DISTINCT pe.opportunity_id
@@ -878,9 +1076,17 @@ def get_bookings(
             )
         """)
         params.extend(teams)
+    if flsms:
+        ph = ",".join(["?"] * len(flsms))
+        clauses.append(f"flsm IN ({ph})")
+        params.extend(flsms)
+    if opp_owners:
+        ph = ",".join(["?"] * len(opp_owners))
+        clauses.append(f"opp_owner_name IN ({ph})")
+        params.extend(opp_owners)
     where = " AND ".join(clauses)
     sql = f"""
-        SELECT DISTINCT ON (opportunity_id)
+        SELECT
             opportunity_id, account_name, opp_description,
             region_lvl3, solution_area_l1, sub_solution_area_l2,
             closing_date, closing_qtr,
@@ -890,12 +1096,275 @@ def get_bookings(
             sde_primary_engagement_name,
             sde_current_territory_owner,
             flsm
-        FROM pipeline
-        WHERE {where}
-        ORDER BY opportunity_id, acv_total_opp DESC
+        FROM (
+            SELECT
+                opportunity_id, account_name, opp_description,
+                region_lvl3, solution_area_l1, sub_solution_area_l2,
+                closing_date, closing_qtr,
+                acv_total_opp,
+                opp_owner_name,
+                vat_dh, vat_full,
+                sde_primary_engagement_name,
+                sde_current_territory_owner,
+                flsm,
+                ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+            FROM pipeline
+            WHERE {where}
+        ) t
+        WHERE t.rn = 1
     """
     rows = query(sql, params or None)
     rows.sort(key=lambda r: r.get("closing_date") or "", reverse=True)
+    return rows
+
+
+@router.get("/bookings/missed-vat")
+def get_missed_vat(
+    closing_qtrs: List[str] = Query(default=[]),
+    regions:      List[str] = Query(default=[]),
+    sol_l1s:      List[str] = Query(default=[]),
+    teams:        List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    """
+    Closed deals (Booked/Won + A-Purchase) where DH was NOT in the VAT,
+    matched against parallel DH-involved opportunities at the same account
+    with the same Solution L1 — surfaces missed VAT coverage.
+    """
+    # Filters applied to the closed side
+    closed_extra_clauses: list[str] = []
+    closed_params: list = []
+    if closing_qtrs:
+        ph = ",".join(["?"] * len(closing_qtrs))
+        closed_extra_clauses.append(f"closing_qtr IN ({ph})")
+        closed_params.extend(closing_qtrs)
+    if regions:
+        ph = ",".join(["?"] * len(regions))
+        closed_extra_clauses.append(f"region_lvl3 IN ({ph})")
+        closed_params.extend(regions)
+    if sol_l1s:
+        ph = ",".join(["?"] * len(sol_l1s))
+        closed_extra_clauses.append(f"solution_area_l1 IN ({ph})")
+        closed_params.extend(sol_l1s)
+
+    closed_filter = ""
+    if closed_extra_clauses:
+        closed_filter = "AND " + " AND ".join(closed_extra_clauses)
+
+    # Filter DH parallel opps by SA team (via pipeline_exploded + targets)
+    team_params: list = []
+    dh_team_filter = ""
+    if teams:
+        team_ph = ",".join(["?"] * len(teams))
+        dh_team_filter = f"""
+            AND lo.opportunity_id IN (
+                SELECT DISTINCT pe.opportunity_id
+                FROM pipeline_exploded pe
+                JOIN targets t ON t.inumber = pe.sa_inumber
+                WHERE pe.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline_exploded)
+                  AND t.area IN ({team_ph})
+            )
+        """
+        team_params.extend(teams)
+
+    all_params_combined = closed_params + team_params
+
+    sql = f"""
+        WITH latest_opps AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   solution_area_l1, sub_solution_area_l2,
+                   drm_category, opp_phase, closing_qtr,
+                   acv_total_opp, vat_dh
+            FROM (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, sub_solution_area_l2,
+                       drm_category, opp_phase, closing_qtr,
+                       acv_total_opp, vat_dh,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY snapshot_week DESC) AS rn
+                FROM pipeline
+            ) t
+            WHERE t.rn = 1
+        ),
+        closed_no_dh AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   solution_area_l1, sub_solution_area_l2,
+                   closing_date, closing_qtr, region_lvl3,
+                   acv_total_opp, vat_full, opp_owner_name,
+                   sde_primary_engagement_name, flsm, drm_category
+            FROM (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, sub_solution_area_l2,
+                       closing_date, closing_qtr, region_lvl3,
+                       acv_total_opp, vat_full, opp_owner_name,
+                       sde_primary_engagement_name, flsm, drm_category,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+                  AND (vat_dh IS NULL OR vat_dh = '')
+                  {closed_filter}
+            ) t
+            WHERE t.rn = 1
+        ),
+        dh_involved AS (
+            SELECT
+                lo.opportunity_id      AS dh_opp_id,
+                lo.account_name,
+                lo.opp_description     AS dh_opp_description,
+                lo.solution_area_l1,
+                lo.sub_solution_area_l2 AS dh_sol_l2,
+                lo.drm_category        AS dh_drm_category,
+                lo.opp_phase           AS dh_opp_phase,
+                lo.closing_qtr         AS dh_closing_qtr,
+                lo.acv_total_opp       AS dh_acv,
+                lo.vat_dh              AS dh_vat_dh,
+                STRING_AGG(dv.sales_team_member_id, ', ') AS dh_vat_inumbers
+            FROM latest_opps lo
+            LEFT JOIN dh_vat dv ON dv.opportunity_id = lo.opportunity_id
+            WHERE lo.vat_dh IS NOT NULL AND lo.vat_dh != ''
+              {dh_team_filter}
+            GROUP BY
+                lo.opportunity_id, lo.account_name, lo.opp_description,
+                lo.solution_area_l1, lo.sub_solution_area_l2,
+                lo.drm_category, lo.opp_phase, lo.closing_qtr,
+                lo.acv_total_opp, lo.vat_dh
+        )
+        SELECT
+            c.opportunity_id       AS closed_opp_id,
+            c.account_name,
+            c.opp_description      AS closed_description,
+            c.solution_area_l1     AS closed_sol_l1,
+            c.sub_solution_area_l2 AS closed_sol_l2,
+            c.closing_date,
+            c.closing_qtr,
+            c.region_lvl3,
+            c.acv_total_opp        AS closed_acv,
+            c.vat_full             AS closed_vat_full,
+            c.opp_owner_name,
+            c.sde_primary_engagement_name,
+            c.flsm,
+            c.drm_category         AS closed_drm_category,
+            d.dh_opp_id,
+            d.dh_opp_description,
+            d.dh_sol_l2,
+            d.dh_drm_category,
+            d.dh_opp_phase,
+            d.dh_closing_qtr,
+            d.dh_acv,
+            d.dh_vat_dh,
+            d.dh_vat_inumbers,
+            CASE WHEN c.sub_solution_area_l2 = d.dh_sol_l2 THEN 1 ELSE 0 END AS same_sol_l2,
+            (SELECT COUNT(*) FROM melody WHERE opp_id = c.opportunity_id) AS closed_melody_count,
+            (SELECT COUNT(*) FROM melody WHERE opp_id = d.dh_opp_id)     AS dh_melody_count
+        FROM closed_no_dh c
+        JOIN dh_involved d
+          ON d.account_name     = c.account_name
+         AND d.dh_opp_id       != c.opportunity_id
+         AND d.solution_area_l1 = c.solution_area_l1
+        ORDER BY c.closing_date DESC NULLS LAST, c.account_name, c.opportunity_id
+    """
+    all_params = all_params_combined or None
+    rows = query(sql, all_params)
+    return rows
+
+
+@router.get("/bookings/shadow-comments")
+def get_shadow_comments(_user=Depends(verify_token)):
+    _ensure_shadow_comments_table()
+    rows = query(
+        "SELECT closed_opp_id, dh_opp_id, comment, updated_by, corregir, "
+        "TO_NVARCHAR(updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at "
+        "FROM shadow_opp_comments",
+        None,
+    )
+    result = {}
+    for r in rows:
+        key = f"{r['closed_opp_id']}|{r['dh_opp_id']}"
+        result[key] = {
+            "comment":    r["comment"] or "",
+            "updated_at": r["updated_at"] or "",
+            "updated_by": r["updated_by"] or "",
+            "corregir":   int(r["corregir"] or 0),
+        }
+    return result
+
+
+@router.put("/bookings/shadow-comments/{closed_opp_id}/{dh_opp_id}")
+def upsert_shadow_comment(
+    closed_opp_id: str,
+    dh_opp_id: str,
+    payload: ShadowComment,
+    _user=Depends(verify_token),
+):
+    _ensure_shadow_comments_table()
+    author = _user.get("name", "")
+    updated = execute(
+        "UPDATE shadow_opp_comments SET comment=?, corregir=?, updated_at=CURRENT_TIMESTAMP, updated_by=? "
+        "WHERE closed_opp_id=? AND dh_opp_id=?",
+        [payload.comment, payload.corregir, author, closed_opp_id, dh_opp_id],
+    )
+    if updated == 0:
+        execute(
+            "INSERT INTO shadow_opp_comments (closed_opp_id, dh_opp_id, comment, corregir, updated_by) VALUES (?,?,?,?,?)",
+            [closed_opp_id, dh_opp_id, payload.comment, payload.corregir, author],
+        )
+    return {"ok": True}
+
+
+@router.get("/bookings/no-dh")
+def get_no_dh(
+    closing_qtrs: List[str] = Query(default=[]),
+    regions:      List[str] = Query(default=[]),
+    sol_l1s:      List[str] = Query(default=[]),
+    sol_l2s:      List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    """All Booked/Won opps where DH had NO presence in the VAT team."""
+    clauses = [
+        "snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)",
+        "(drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')",
+        "(vat_dh IS NULL OR vat_dh = '')",
+    ]
+    params: list = []
+    if closing_qtrs:
+        ph = ",".join(["?"] * len(closing_qtrs))
+        clauses.append(f"closing_qtr IN ({ph})")
+        params.extend(closing_qtrs)
+    if regions:
+        ph = ",".join(["?"] * len(regions))
+        clauses.append(f"region_lvl3 IN ({ph})")
+        params.extend(regions)
+    if sol_l1s:
+        ph = ",".join(["?"] * len(sol_l1s))
+        clauses.append(f"solution_area_l1 IN ({ph})")
+        params.extend(sol_l1s)
+    if sol_l2s:
+        ph = ",".join(["?"] * len(sol_l2s))
+        clauses.append(f"sub_solution_area_l2 IN ({ph})")
+        params.extend(sol_l2s)
+    where_str = " AND ".join(clauses)
+    sql = f"""
+        SELECT
+            opportunity_id, account_name, opp_description,
+            region_lvl3, solution_area_l1, sub_solution_area_l2,
+            closing_date, closing_qtr, acv_total_opp,
+            opp_owner_name, vat_full,
+            sde_primary_engagement_name, flsm
+        FROM (
+            SELECT
+                opportunity_id, account_name, opp_description,
+                region_lvl3, solution_area_l1, sub_solution_area_l2,
+                closing_date, closing_qtr, acv_total_opp,
+                opp_owner_name, vat_full,
+                sde_primary_engagement_name, flsm,
+                ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+            FROM pipeline
+            WHERE {where_str}
+        ) t
+        WHERE t.rn = 1
+        ORDER BY closing_date DESC
+    """
+    rows = query(sql, params or None)
     return rows
 
 
@@ -974,6 +1443,8 @@ def pipeline_charts(
     channel_partners: List[str] = Query(default=[]),
     presales_statuses: List[str] = Query(default=[]),
     deal_type: Optional[str] = None,
+    acv_min: Optional[float] = None,
+    acv_max: Optional[float] = None,
     _user=Depends(verify_token),
 ):
     """
@@ -995,6 +1466,12 @@ def pipeline_charts(
         presales_statuses=presales_statuses,
     )
     where = _apply_deal_type(where, deal_type)
+    if acv_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
+        params.append(float(acv_min))
+    if acv_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp <= %s"
+        params.append(float(acv_max))
     neg_filter = "AND acv_usd > 0" if exclude_neg else ""
     purchase_expr = (
         "CASE WHEN opp_phase = 'A - Purchase' THEN 'Booked/Won' ELSE drm_category END"
@@ -1102,6 +1579,108 @@ def pipeline_charts(
     result['by_age_range'].sort(key=lambda x: x.pop('_ord', 99))
 
     return result
+
+
+@router.get("/single-bag-breakdown")
+def get_single_bag_breakdown(
+    closing_qtr:       Optional[str]   = None,
+    region:            Optional[str]   = None,
+    closing_qtrs:      List[str]       = Query(default=[]),
+    regions:           List[str]       = Query(default=[]),
+    sol_l1s:           List[str]       = Query(default=[]),
+    sol_l2s:           List[str]       = Query(default=[]),
+    drms:              List[str]       = Query(default=[]),
+    opp_phases:        List[str]       = Query(default=[]),
+    opp_owners:        List[str]       = Query(default=[]),
+    local_owners:      List[str]       = Query(default=[]),
+    flsms:             List[str]       = Query(default=[]),
+    iss_groups:        List[str]       = Query(default=[]),
+    acc_sub_segments:  List[str]       = Query(default=[]),
+    qual_decisions:    List[str]       = Query(default=[]),
+    channel_partners:  List[str]       = Query(default=[]),
+    presales_statuses: List[str]       = Query(default=[]),
+    engagement_types:  List[str]       = Query(default=[]),
+    has_comment:       bool            = False,
+    acv_min:           Optional[float] = None,
+    acv_max:           Optional[float] = None,
+    _user=Depends(verify_token),
+):
+    """Single bag deal counts and ACV by Solution L1, with Finance & Spend sub-breakdown."""
+    where, params = _build_where(
+        closing_qtr=closing_qtr, region=region,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4=None,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s,
+        drms=drms, opp_phases=opp_phases,
+        opp_owners=opp_owners, local_owners=local_owners, flsms=flsms,
+        iss_groups=iss_groups, acc_sub_segments=acc_sub_segments,
+        qual_decisions=qual_decisions, channel_partners=channel_partners,
+        presales_statuses=presales_statuses,
+        engagement_types=engagement_types,
+    )
+    if has_comment:
+        cmt_clause = "opportunity_id IN (SELECT DISTINCT opportunity_id FROM comments)"
+        where = (where + " AND " + cmt_clause) if where else ("WHERE " + cmt_clause)
+    if acv_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
+        params.append(float(acv_min))
+    if acv_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp <= %s"
+        params.append(float(acv_max))
+
+    where_single = _apply_deal_type(where, 'single')
+
+    # ── by Solution L1 ──────────────────────────────────────────────────────
+    l1_sql = f"""
+        SELECT solution_area_l1                    AS label,
+               COUNT(DISTINCT opportunity_id)      AS n_opps,
+               COALESCE(SUM(acv_usd), 0)           AS acv
+        FROM pipeline
+        {where_single}
+        GROUP BY solution_area_l1
+        ORDER BY acv DESC
+    """
+    by_sol_l1 = [
+        {'label': r['label'], 'n_opps': r['n_opps'], 'acv': float(r['acv'])}
+        for r in query(l1_sql, params or None)
+    ]
+
+    # ── Finance & Spend sub-breakdown ────────────────────────────────────────
+    fin_where = where_single + " AND solution_area_l1 = %s"
+    fin_params = list(params) + ['Finance and Spend Management']
+
+    fin_sql = f"""
+        WITH fin_opps AS (
+            SELECT opportunity_id,
+                   SUM(acv_usd) AS acv,
+                   SUM(CASE WHEN sub_solution_area_l2 = 'Procurement' THEN 1 ELSE 0 END) AS proc_lines,
+                   SUM(CASE WHEN sub_solution_area_l2 = 'Fieldglass'  THEN 1 ELSE 0 END) AS fg_lines,
+                   COUNT(*) AS total_lines
+            FROM pipeline
+            {fin_where}
+            GROUP BY opportunity_id
+        )
+        SELECT
+            COUNT(*)  AS total_n,
+            COALESCE(SUM(acv), 0)  AS total_acv,
+            SUM(CASE WHEN proc_lines = total_lines THEN 1 ELSE 0 END)  AS procurement_n,
+            COALESCE(SUM(CASE WHEN proc_lines = total_lines THEN acv ELSE 0 END), 0)  AS procurement_acv,
+            SUM(CASE WHEN fg_lines = total_lines THEN 1 ELSE 0 END)  AS fieldglass_n,
+            COALESCE(SUM(CASE WHEN fg_lines = total_lines THEN acv ELSE 0 END), 0)  AS fieldglass_acv,
+            SUM(CASE WHEN proc_lines < total_lines AND fg_lines < total_lines THEN 1 ELSE 0 END)  AS other_n,
+            COALESCE(SUM(CASE WHEN proc_lines < total_lines AND fg_lines < total_lines THEN acv ELSE 0 END), 0)  AS other_acv
+        FROM fin_opps
+    """
+    fr = query_one(fin_sql, fin_params) or {}
+
+    return {
+        'by_sol_l1': by_sol_l1,
+        'finance_breakdown': {
+            'total':            {'n_opps': int(fr.get('total_n', 0) or 0),       'acv': float(fr.get('total_acv', 0) or 0)},
+            'procurement_only': {'n_opps': int(fr.get('procurement_n', 0) or 0), 'acv': float(fr.get('procurement_acv', 0) or 0)},
+            'fieldglass_only':  {'n_opps': int(fr.get('fieldglass_n', 0) or 0),  'acv': float(fr.get('fieldglass_acv', 0) or 0)},
+            'other':            {'n_opps': int(fr.get('other_n', 0) or 0),       'acv': float(fr.get('other_acv', 0) or 0)},
+        },
+    }
 
 
 @router.get("/{opp_id}")

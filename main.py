@@ -21,6 +21,50 @@ app.add_middleware(
     allow_headers=["*", "X-Outlook-Token", "Authorization", "Content-Type"],
 )
 
+@app.on_event("startup")
+async def run_migrations():
+    """Ensure HANA table columns added after initial schema deployment exist."""
+    try:
+        from database import query, execute, IS_HANA
+        if not IS_HANA:
+            return
+
+        def _migrate_table(table_upper: str, pending: list):
+            rows = query(
+                "SELECT COLUMN_NAME FROM SYS.TABLE_COLUMNS WHERE TABLE_NAME = ?",
+                [table_upper]
+            )
+            existing = {r["column_name"].lower() for r in rows}
+            for col, ddl in pending:
+                if col not in existing:
+                    execute(ddl)
+                    print(f"[migration] Applied: added {col.upper()} to {table_upper}", flush=True)
+                else:
+                    print(f"[migration] OK: {col.upper()} already in {table_upper}", flush=True)
+
+        _migrate_table("PIPELINE", [
+            ("phase_since_days", 'ALTER TABLE "PIPELINE" ADD ("PHASE_SINCE_DAYS" INTEGER)'),
+            ("region_lvl4",      'ALTER TABLE "PIPELINE" ADD ("REGION_LVL4" NVARCHAR(100))'),
+        ])
+        _migrate_table("PIPELINE_LAST_WEEK", [
+            ("region_lvl4",                    'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("REGION_LVL4" NVARCHAR(100))'),
+            ("opp_phase",                      'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("OPP_PHASE" NVARCHAR(100))'),
+            ("engagement_type",                'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("ENGAGEMENT_TYPE" NVARCHAR(50))'),
+            ("iss_group_text",                 'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("ISS_GROUP_TEXT" NVARCHAR(200))'),
+            ("account_planned_archetype_text", 'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("ACCOUNT_PLANNED_ARCHETYPE_TEXT" NVARCHAR(200))'),
+            ("deal_qualification_decision",    'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("DEAL_QUALIFICATION_DECISION" NVARCHAR(100))'),
+            ("flsm",                           'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("FLSM" NVARCHAR(100))'),
+            ("vat_dh",                         'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("VAT_DH" NVARCHAR(2000))'),
+            ("vat_full",                       'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("VAT_FULL" NVARCHAR(2000))'),
+            ("vat_size",                       'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("VAT_SIZE" INTEGER)'),
+            ("acv_total_opp",                  'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("ACV_TOTAL_OPP" DOUBLE)'),
+            ("acv_per_vat",                    'ALTER TABLE "PIPELINE_LAST_WEEK" ADD ("ACV_PER_VAT" DOUBLE)'),
+        ])
+
+    except Exception as exc:
+        print(f"[migration] FAILED (non-fatal): {exc}", flush=True)
+
+
 _last_seen_cache: dict[str, float] = {}  # email -> unix timestamp, throttle DB writes
 
 @app.middleware("http")

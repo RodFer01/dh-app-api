@@ -5,11 +5,14 @@ Endpoints:
   GET /api/ae-analysis/territory — pipeline grouped by AE + industry (mastercode)
   GET /api/ae-analysis/opps      — opportunity list for a given AE, filterable
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
+from pydantic import BaseModel
 from typing import List, Optional
 import httpx
 import os
+import re
 import time
+from io import BytesIO
 from auth import verify_token
 from database import query
 
@@ -17,6 +20,88 @@ _SPARK_URL = "https://spark-meeting.cfapps.us10-002.hana.ondemand.com"
 _spark_cache: dict = {"token": None, "exp": 0.0, "data": None, "data_at": 0.0}
 
 router = APIRouter(prefix="/api/ae-analysis", tags=["ae-analysis"])
+
+
+def _databricks_contacts_fallback(bpids: list[str]) -> list[dict]:
+    """Fetch contacts directly from Databricks for BPIDs not in outreach_contacts."""
+    if not bpids:
+        return []
+    token = os.getenv("DATABRICKS_TOKEN", "")
+    if not token:
+        return []
+    try:
+        from databricks import sql as dbsql
+        ph = ",".join(["?" for _ in bpids])
+        q = f"""
+            SELECT
+                p.ACCOUNT_BPID                      AS account_bpid,
+                CAST(p.PROSPECT_ID AS VARCHAR(50))  AS prospect_id,
+                p.FIRST_NAME                        AS first_name,
+                p.LAST_NAME                         AS last_name,
+                p.TITLE                             AS title,
+                p.FUNCTION                          AS function,
+                e.EMAIL                             AS email,
+                p.WORK_PHONE                        AS work_phone,
+                p.MOBILE_PHONE                      AS mobile_phone,
+                p.ENGAGED_SCORE                     AS engaged_score,
+                p.KEY_EXECUTIVE_CONTACT             AS key_executive_contact,
+                p.BUYING_COMMITTEE_ROLE_ERP         AS role_erp,
+                p.BUYING_COMMITTEE_ROLE_HCM         AS role_hcm,
+                p.BUYING_COMMITTEE_ROLE_CX          AS role_cx,
+                p.BUYING_COMMITTEE_ROLE_SCM         AS role_scm,
+                p.BUYING_COMMITTEE_ROLE_BTP         AS role_btp,
+                p.BUYING_COMMITTEE_ROLE_F_S         AS role_fs
+            FROM ots2_prod.silver.prospects p
+            LEFT JOIN (
+                SELECT PROSPECT_ID, EMAIL
+                FROM ots2_prod.silver.prospect_email_addresses
+                WHERE IS_DELETED_IN_APP = false AND `ORDER` = 1
+            ) e ON e.PROSPECT_ID = p.PROSPECT_ID
+            WHERE p.IS_DELETED_IN_APP = false
+              AND p.ACCOUNT_BPID IN ({ph})
+            ORDER BY p.ACCOUNT_BPID, p.ENGAGED_SCORE DESC NULLS LAST
+        """
+        conn = dbsql.connect(
+            server_hostname=os.getenv("DATABRICKS_HOST", "adb-4313574291768790.10.azuredatabricks.net"),
+            http_path=os.getenv("DATABRICKS_PATH", "/sql/1.0/warehouses/3679dfdc0cbd20ed"),
+            access_token=token,
+            _tls_no_verify=True,
+        )
+        with conn.cursor() as cur:
+            cur.execute(q, bpids)
+            cols = [d[0].lower() for d in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        conn.close()
+        result = []
+        for r in rows:
+            result.append({
+                "account_bp":            str(r.get("account_bpid") or ""),
+                "account_name":          str(r.get("account_bpid") or ""),  # enriched later from pipeline
+                "opp_owner_name":        None,
+                "region_lvl3":           None,
+                "iss_group_text":        None,
+                "prospect_id":           str(r.get("prospect_id") or ""),
+                "first_name":            r.get("first_name"),
+                "last_name":             r.get("last_name"),
+                "title":                 r.get("title"),
+                "function":              r.get("function"),
+                "email":                 r.get("email"),
+                "work_phone":            r.get("work_phone"),
+                "mobile_phone":          r.get("mobile_phone"),
+                "engaged_score":         r.get("engaged_score"),
+                "key_executive_contact": r.get("key_executive_contact"),
+                "role_erp":              r.get("role_erp"),
+                "role_hcm":              r.get("role_hcm"),
+                "role_cx":               r.get("role_cx"),
+                "role_scm":              r.get("role_scm"),
+                "role_btp":              r.get("role_btp"),
+                "role_fs":               r.get("role_fs"),
+            })
+        return result
+    except Exception as exc:
+        import sys
+        print(f"Databricks fallback error: {exc}", file=sys.stderr, flush=True)
+        return []
 
 # ── Solution equivalence map ───────────────────────────────────────────────────
 # Maps suggestion label → pipeline L1/L2 values it should be considered "covered" by.
@@ -649,28 +734,41 @@ def audience_filters(_user=Depends(verify_token)):
     }
 
 
-@router.get("/audience")
-def audience(
-    opp_owners:   List[str] = Query(default=[]),
-    flsms:        List[str] = Query(default=[]),
-    regions:      List[str] = Query(default=[]),
-    region_lvl4s: List[str] = Query(default=[]),
-    closing_qtrs: List[str] = Query(default=[]),
-    iss_groups:   List[str] = Query(default=[]),
-    drm_cats:     List[str] = Query(default=[]),
-    titles:       List[str] = Query(default=[]),
-    functions:    List[str] = Query(default=[]),
-    lob_roles:    List[str] = Query(default=[]),
-    solutions:    List[str] = Query(default=[]),
-    sol_l1s:      List[str] = Query(default=[]),
-    sol_l2s:      List[str] = Query(default=[]),
-    has_opps:     bool = False,
-    _user=Depends(verify_token),
+class AudienceRequest(BaseModel):
+    opp_owners:    List[str] = []
+    flsms:         List[str] = []
+    regions:       List[str] = []
+    region_lvl4s:  List[str] = []
+    closing_qtrs:  List[str] = []
+    iss_groups:    List[str] = []
+    drm_cats:      List[str] = []
+    titles:        List[str] = []
+    functions:     List[str] = []
+    lob_roles:     List[str] = []
+    solutions:     List[str] = []
+    sol_l1s:       List[str] = []
+    sol_l2s:       List[str] = []
+    has_opps:      bool = False
+    account_bpids: List[str] = []
+
+
+def _audience_logic(
+    opp_owners:   list,
+    flsms:        list,
+    regions:      list,
+    region_lvl4s: list,
+    closing_qtrs: list,
+    iss_groups:   list,
+    drm_cats:     list,
+    titles:       list,
+    functions:    list,
+    lob_roles:    list,
+    solutions:    list,
+    sol_l1s:      list,
+    sol_l2s:      list,
+    has_opps:     bool,
+    account_bpids: list,
 ):
-    """
-    Campaign audience builder: accounts + matching contacts + open opportunities.
-    Territory filters scope to a pipeline subset; contact/solution filters narrow further.
-    """
     # ── Territory subquery ────────────────────────────────────────────────────
     t_clauses, t_params = [f"snapshot_week = {_SNAP}"], []
 
@@ -687,6 +785,7 @@ def audience(
     mf("closing_qtr",    closing_qtrs)
     mf("iss_group_text", iss_groups)
     mf("drm_category",   drm_cats)
+    # account_bpids is intentionally NOT added here — it goes to the contact WHERE
 
     if sol_l1s:
         ph = ",".join(["%s"] * len(sol_l1s))
@@ -699,8 +798,26 @@ def audience(
 
     territory_where = " AND ".join(t_clauses)
 
+    # When account_bpids is the only territory input, LEFT JOIN so accounts
+    # without pipeline entries still return contacts.
+    has_territory_filters = any([
+        opp_owners, flsms, regions, region_lvl4s,
+        closing_qtrs, iss_groups, drm_cats, sol_l1s, sol_l2s,
+    ])
+    join_type = "JOIN" if has_territory_filters else "LEFT JOIN"
+
+    # Guard: require at least one narrowing filter to prevent full-table scan
+    if not has_territory_filters and not account_bpids:
+        return {"accounts": [], "total_accounts": 0, "total_contacts": 0}
+
     # ── Contact filter clauses ────────────────────────────────────────────────
     c_clauses, c_params = [], []
+    bpid_params: list = []
+
+    if account_bpids:
+        ph = ",".join(["%s"] * len(account_bpids))
+        c_clauses.append(f"oc.account_bpid IN ({ph})")
+        bpid_params = list(account_bpids)
 
     if titles:
         ph = ",".join(["%s"] * len(titles))
@@ -731,11 +848,12 @@ def audience(
     contact_where = ("AND " + " AND ".join(c_clauses)) if c_clauses else ""
 
     # ── Query 1: contacts × territory ────────────────────────────────────────
-    all_params = t_params + c_params
+    # param order: territory → bpids → other contact filters
+    all_params = t_params + bpid_params + c_params
     contact_rows = query(f"""
         SELECT
-            oc.account_bpid          AS account_bp,
-            p.account_name,
+            oc.account_bpid                          AS account_bp,
+            COALESCE(p.account_name, oc.account_bpid) AS account_name,
             p.opp_owner_name,
             p.region_lvl3,
             p.iss_group_text,
@@ -756,7 +874,7 @@ def audience(
             oc.role_btp,
             oc.role_fs
         FROM outreach_contacts oc
-        JOIN (
+        {join_type} (
             SELECT account_bp,
                    MAX(account_name)   AS account_name,
                    MAX(opp_owner_name) AS opp_owner_name,
@@ -771,6 +889,13 @@ def audience(
         ORDER BY oc.account_bpid, oc.engaged_score DESC NULLS LAST
         LIMIT 5000
     """, all_params)
+
+    # ── Databricks fallback for BPIDs not found in outreach_contacts ──────────
+    if account_bpids:
+        found_bpids = {r["account_bp"] for r in contact_rows}
+        missing = [bp for bp in account_bpids if bp not in found_bpids]
+        if missing:
+            contact_rows = list(contact_rows) + _databricks_contacts_fallback(missing)
 
     if not contact_rows:
         return {"accounts": [], "total_accounts": 0, "total_contacts": 0}
@@ -870,6 +995,45 @@ def audience(
     }
 
 
+@router.get("/audience")
+def audience(
+    opp_owners:    List[str] = Query(default=[]),
+    flsms:         List[str] = Query(default=[]),
+    regions:       List[str] = Query(default=[]),
+    region_lvl4s:  List[str] = Query(default=[]),
+    closing_qtrs:  List[str] = Query(default=[]),
+    iss_groups:    List[str] = Query(default=[]),
+    drm_cats:      List[str] = Query(default=[]),
+    titles:        List[str] = Query(default=[]),
+    functions:     List[str] = Query(default=[]),
+    lob_roles:     List[str] = Query(default=[]),
+    solutions:     List[str] = Query(default=[]),
+    sol_l1s:       List[str] = Query(default=[]),
+    sol_l2s:       List[str] = Query(default=[]),
+    has_opps:      bool = False,
+    account_bpids: List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    return _audience_logic(
+        opp_owners, flsms, regions, region_lvl4s,
+        closing_qtrs, iss_groups, drm_cats,
+        titles, functions, lob_roles,
+        solutions, sol_l1s, sol_l2s,
+        has_opps, account_bpids,
+    )
+
+
+@router.post("/audience")
+def audience_post(body: AudienceRequest, _user=Depends(verify_token)):
+    return _audience_logic(
+        body.opp_owners, body.flsms, body.regions, body.region_lvl4s,
+        body.closing_qtrs, body.iss_groups, body.drm_cats,
+        body.titles, body.functions, body.lob_roles,
+        body.solutions, body.sol_l1s, body.sol_l2s,
+        body.has_opps, body.account_bpids,
+    )
+
+
 @router.get("/spark-registrations")
 def get_spark_registrations(_user=Depends(verify_token)):
     """Proxy to spark-meeting: returns registrations keyed by lowercase email. Cached 5 min."""
@@ -927,3 +1091,57 @@ def get_installed_base(account_bp: str, _user=Depends(verify_token)):
             "status":        r["status"],
         })
     return {"account_bp": account_bp, "solutions": grouped}
+
+
+@router.post("/upload-accounts")
+async def upload_accounts(file: UploadFile = File(...), _user=Depends(verify_token)):
+    """Parse an Excel file and return SAP BPIDs found in the 'Customer ID' column."""
+    try:
+        import openpyxl
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl não instalado.")
+
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=422, detail="Envie um arquivo .xlsx ou .xls.")
+
+    contents = await file.read()
+    try:
+        wb = openpyxl.load_workbook(BytesIO(contents), read_only=True, data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Não foi possível abrir o arquivo: {exc}")
+
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+
+    # Find the Customer ID column
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        wb.close()
+        raise HTTPException(status_code=422, detail="Arquivo vazio.")
+
+    col_idx = 0  # default: first column
+    for i, h in enumerate(header_row or []):
+        if h and re.search(r"customer.?id", str(h).strip(), re.IGNORECASE):
+            col_idx = i
+            break
+
+    bpids: list[str] = []
+    seen: set[str] = set()
+    for row in rows_iter:
+        if row is None or col_idx >= len(row):
+            continue
+        val = row[col_idx]
+        if val is None:
+            continue
+        s = str(val).strip()
+        # Remove any decimal suffix Excel adds to integers (e.g. "1124161.0" → "1124161")
+        if re.match(r"^\d+\.0$", s):
+            s = s[:-2]
+        # Accept any pure-numeric BPID between 5 and 15 digits
+        if re.match(r"^\d{5,15}$", s) and s not in seen:
+            seen.add(s)
+            bpids.append(s)
+
+    wb.close()
+    return {"bpids": bpids, "total": len(bpids)}

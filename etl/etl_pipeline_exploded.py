@@ -63,7 +63,7 @@ def _load_sa_per_opp(conn) -> dict[str, list[dict]]:
 
 def run() -> int:
     snapshot = snap_week()
-    log.info("Building pipeline_exploded for snapshot ? …", snapshot)
+    log.info("Building pipeline_exploded for snapshot %s …", snapshot)
 
     with get_conn() as conn:
         rules    = _load_calc_rules(conn)
@@ -134,13 +134,11 @@ def run() -> int:
             cols    = list(exploded[0].keys())
             col_str = ", ".join(c.upper() for c in cols)
             ph      = ", ".join("?" for _ in cols)
+            sql     = f"INSERT INTO pipeline_exploded ({col_str}) VALUES ({ph})"
             cur2 = conn.cursor()
             for i in range(0, len(exploded), 500):
-                for row in exploded[i:i+500]:
-                    cur2.execute(
-                        f"INSERT INTO pipeline_exploded ({col_str}) VALUES ({ph})",
-                        [row[c] for c in cols]
-                    )
+                batch = [[row[c] for c in cols] for row in exploded[i:i + 500]]
+                cur2.executemany(sql, batch)
 
     log.info("pipeline_exploded: %d rows inserted", len(exploded))
     return len(exploded)

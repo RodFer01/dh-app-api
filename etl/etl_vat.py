@@ -27,9 +27,16 @@ _COLS = {
 
 def _load_vat(path, table: str) -> int:
     log.info("Loading %s → %s …", path.name, table)
-    df = pd.read_csv(path, sep=";", skiprows=1, encoding="utf-8",
-                     on_bad_lines="skip")
+
+    # Try semicolon first (SAC default), fall back to comma
+    df = pd.read_csv(path, sep=";", skiprows=1, encoding="utf-8", on_bad_lines="skip")
+    if len(df.columns) <= 1:
+        df = pd.read_csv(path, sep=",", skiprows=1, encoding="utf-8", on_bad_lines="skip")
+    if "Opportunity ID" not in df.columns and len(df.columns) <= 1:
+        # skiprows=1 may have eaten the real header — retry without skip
+        df = pd.read_csv(path, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
     df.columns = [c.strip() for c in df.columns]
+    log.info("  columns found: %s", list(df.columns[:6]))  # first 6 for quick check
 
     rows = []
     for _, r in df.iterrows():

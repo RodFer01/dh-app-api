@@ -76,12 +76,24 @@ def upsert(conn, table: str, rows: list[dict], conflict_cols: list[str]) -> int:
     col_str = ", ".join(c.upper() for c in cols)
     ph      = ", ".join("?" for _ in cols)
     tname   = table.strip('"').upper()
-    sql     = f'INSERT INTO "{tname}" ({col_str}) VALUES ({ph})'
+
+    # Check if table has a primary key — UPSERT WITH PRIMARY KEY requires one
+    cur_pk = conn.cursor()
+    cur_pk.execute(
+        "SELECT COUNT(*) FROM SYS.CONSTRAINTS WHERE TABLE_NAME = ? AND IS_PRIMARY_KEY = 'TRUE'",
+        [tname]
+    )
+    has_pk = cur_pk.fetchone()[0] > 0
+
+    if has_pk:
+        sql = f'UPSERT "{tname}" ({col_str}) VALUES ({ph}) WITH PRIMARY KEY'
+    else:
+        sql = f'INSERT INTO "{tname}" ({col_str}) VALUES ({ph})'
 
     cur2 = conn.cursor()
     for i in range(0, len(rows), 500):
-        for row in rows[i:i + 500]:
-            cur2.execute(sql, [row[c] for c in cols])
+        batch = [[row[c] for c in cols] for row in rows[i:i + 500]]
+        cur2.executemany(sql, batch)
     return len(rows)
 
 

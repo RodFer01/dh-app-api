@@ -29,6 +29,47 @@ _PH = "?" if IS_HANA else "%s"
 
 DES_TEMPLATE_ID = "ec22e094-61e0-4e46-9a58-80141bf0373b"
 DES_SITE_URL = "https://digital-discover-expert-series-esp-5e2d.sites-sap.com/#home"
+_DES_BASE    = "https://digital-discover-expert-series-esp-5e2d.sites-sap.com/"
+
+_AREA_ANCHOR: dict[str, str] = {
+    "BTP":            "btp",
+    "Data":           "btp",
+    "Business Suite": "erp",
+    "CX":             "cx",
+    "HCM":            "hcm",
+    "HCM + Finance":  "hcm",
+    "Finance":        "hcm",
+    "Procurement":    "procurement",
+    "SCM":            "scm",
+    "Supply Chain":   "scm",
+}
+
+_SESSION_GROUPS: list[tuple[str, set[str]]] = [
+    ("ERP Cloud",                {"Business Suite"}),
+    ("Customer Experience",      {"CX"}),
+    ("Human Capital Management", {"HCM", "HCM + Finance"}),
+    ("Finance",                  {"Finance"}),
+    ("Compras",                  {"Procurement"}),
+    ("Supply Chain",             {"SCM", "Supply Chain"}),
+    ("Business AI Platform",     {"BTP", "Data"}),
+]
+
+
+def _area_url(area: str) -> str:
+    anchor = _AREA_ANCHOR.get(area or "", "home")
+    return f"{_DES_BASE}#{anchor}"
+
+
+def _fmt_date(d) -> str:
+    from datetime import date as _date, datetime as _dt
+    if isinstance(d, _date):
+        return d.strftime("%d/%m/%Y")
+    if isinstance(d, str) and len(d) >= 10:
+        try:
+            return _dt.strptime(d[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            pass
+    return str(d)[:10]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -93,58 +134,100 @@ def _get_template_editable_block_id(sess: _req.Session, template_id: str):
 def _build_des_html(first_name: str, sessions: list) -> str:
     """Build personalized HTML for a DES invite email."""
     name_display = first_name or "prezado(a)"
-    rows_html = ""
+
+    # Group sessions by LoB, preserving group order; ungrouped go last
+    grouped: dict[str, list] = {label: [] for label, _ in _SESSION_GROUPS}
+    ungrouped: list = []
     for s in sessions:
-        upcoming = s.get("upcoming_dates") or []
-        if upcoming:
-            dates_str = ", ".join(str(d)[:10] for d in upcoming[:2])
-        elif s.get("next_date"):
-            dates_str = str(s["next_date"])[:10]
-        else:
-            dates_str = "A definir"
-        desc = (s.get("description") or "")
-        if len(desc) > 120:
-            desc = desc[:117] + "..."
+        area = s.get("area") or ""
+        matched = False
+        for label, areas in _SESSION_GROUPS:
+            if area in areas:
+                grouped[label].append(s)
+                matched = True
+                break
+        if not matched:
+            ungrouped.append(s)
+
+    def _session_rows(s_list: list) -> str:
+        html = ""
+        for s in s_list:
+            upcoming = s.get("upcoming_dates") or []
+            if upcoming:
+                dates_str = " · ".join(_fmt_date(d) for d in upcoming[:2])
+            elif s.get("next_date"):
+                dates_str = _fmt_date(s["next_date"])
+            else:
+                dates_str = "A definir"
+            desc    = s.get("description") or ""
+            title   = s.get("title") or ""
+            reg_url = _area_url(s.get("area", ""))
+            html += (
+                f'<tr style="background:#f9f9f9;">'
+                f'<td style="padding:10px 14px 4px 14px;vertical-align:top;width:35%;">'
+                f'<span style="font-size:13px;font-weight:700;color:#1a1a1a;">{title}</span>'
+                f'</td>'
+                f'<td style="padding:10px 14px 4px 14px;vertical-align:top;">'
+                f'<span style="font-size:12px;color:#555;line-height:1.5;">{desc or "—"}</span>'
+                f'</td>'
+                f'</tr>'
+                f'<tr style="background:#f9f9f9;">'
+                f'<td style="padding:4px 14px 12px 14px;border-bottom:2px solid #e0e0e0;vertical-align:middle;">'
+                f'<span style="font-size:12px;color:#0070B8;font-weight:600;">{dates_str} · 10:00</span>'
+                f'</td>'
+                f'<td style="padding:4px 14px 12px 14px;border-bottom:2px solid #e0e0e0;vertical-align:middle;text-align:right;">'
+                f'<a href="{reg_url}" style="display:inline-block;background-color:#0070B8;color:white;font-size:13px;'
+                f'font-weight:600;padding:7px 18px;border-radius:4px;text-decoration:none;white-space:nowrap;">Inscrever-se</a>'
+                f'</td>'
+                f'</tr>'
+                f'<tr><td colspan="2" style="padding:4px 0;"></td></tr>'
+            )
+        return html
+
+    rows_html = ""
+    for label, _ in _SESSION_GROUPS:
+        s_list = grouped[label]
+        if not s_list:
+            continue
         rows_html += (
             f'<tr>'
-            f'<td style="padding:8px 12px;border-bottom:1px solid #e0e0e0;font-weight:600;color:#1a1a1a;">{s.get("title","")}</td>'
-            f'<td style="padding:8px 12px;border-bottom:1px solid #e0e0e0;color:#555;max-width:200px;">{desc or "—"}</td>'
-            f'<td style="padding:8px 12px;border-bottom:1px solid #e0e0e0;color:#555;white-space:nowrap;">{dates_str}</td>'
-            f'<td style="padding:8px 12px;border-bottom:1px solid #e0e0e0;color:#555;">{s.get("advisor_name") or "—"}</td>'
-            f'<td style="padding:8px 12px;border-bottom:1px solid #e0e0e0;">'
-            f'<a href="{DES_SITE_URL}" style="color:#0070B8;font-weight:600;text-decoration:none;">Inscrever-se →</a>'
-            f'</td>'
+            f'<td colspan="2" style="padding:10px 14px;background:#0070B8;color:white;'
+            f'font-size:13px;font-weight:700;">{label}</td>'
             f'</tr>'
         )
+        rows_html += _session_rows(s_list)
+
+    if ungrouped:
+        rows_html += (
+            f'<tr>'
+            f'<td colspan="2" style="padding:10px 14px;background:#0070B8;color:white;'
+            f'font-size:13px;font-weight:700;">Outras Sessões</td>'
+            f'</tr>'
+        )
+        rows_html += _session_rows(ungrouped)
+
     return (
-        f'<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0 0 12px;">'
+        f'<p style="font-size:14px;color:#333;margin:0 0 12px;">'
         f'Olá, <strong>{name_display}</strong>,</p>'
 
-        f'<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;line-height:1.6;margin:0 0 12px;">'
+        f'<p style="font-size:14px;color:#333;line-height:1.6;margin:0 0 12px;">'
         f'É com muito prazer que convidamos você para o <strong>Discover Expert Series</strong> — uma série exclusiva de '
         f'sessões com os especialistas da SAP, criada para explorar em profundidade as soluções disponíveis para '
         f'transformar o seu negócio. Cada encontro combina visão estratégica e conhecimento técnico em um formato '
         f'prático e direto ao ponto, com espaço para perguntas e discussões.</p>'
 
-        f'<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0 0 16px;">'
+        f'<p style="font-size:14px;color:#333;margin:0 0 16px;">'
         f'Selecionamos as seguintes sessões para você:</p>'
 
-        f'<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;margin:0 0 20px;">'
-        f'<thead><tr style="background:#0070B8;color:white;">'
-        f'<th style="padding:10px 12px;text-align:left;font-weight:600;white-space:nowrap;">Sessão</th>'
-        f'<th style="padding:10px 12px;text-align:left;font-weight:600;">Descrição</th>'
-        f'<th style="padding:10px 12px;text-align:left;font-weight:600;white-space:nowrap;">Data</th>'
-        f'<th style="padding:10px 12px;text-align:left;font-weight:600;white-space:nowrap;">Especialista</th>'
-        f'<th style="padding:10px 12px;text-align:left;font-weight:600;white-space:nowrap;">Inscrição</th>'
-        f'</tr></thead>'
+        f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin:0 0 20px;">'
         f'<tbody>{rows_html}</tbody>'
         f'</table>'
 
-        f'<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0 0 12px;">'
-        f'Acesse o portal para conferir toda a agenda e se inscrever: '
-        f'<a href="{DES_SITE_URL}" style="color:#0070B8;font-weight:600;">{DES_SITE_URL}</a></p>'
+        f'<p style="font-size:14px;color:#333;margin:0 0 12px;">'
+        f'Acesse o portal para conferir toda a agenda: '
+        f'<a href="{DES_SITE_URL}" style="color:#0070B8;font-weight:600;">{_DES_BASE}</a></p>'
 
-        f'<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;">'
+        f'<p style="font-size:14px;color:#333;margin:0;">'
         f'Contamos com a sua presença!</p>'
     )
 
@@ -370,6 +453,8 @@ def send_test(campaign_id: int, body: SendTestIn, current_user=Depends(verify_to
 
     editable_send_content = []
     if spark_sessions:
+        print(f"[DH-ESS] send-test first_session_keys={list(spark_sessions[0].keys()) if spark_sessions else []}", flush=True)
+        print(f"[DH-ESS] send-test first_session={spark_sessions[0] if spark_sessions else {}}", flush=True)
         html = _build_des_html(body.test_name or "Contato Teste", spark_sessions)
         editable_send_content = [html]
         print(f"[DH-ESS] send-test editable_block_id={editable_block_id} html_len={len(html)}", flush=True)
