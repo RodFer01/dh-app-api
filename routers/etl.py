@@ -299,7 +299,10 @@ def get_job(job_id: str, _user=Depends(verify_token)):
 
 def _run_etl_job(job_id: str, source_id: str, saved_paths: list[Path], file_key: Optional[str]):
     """Run in a background thread. Updates job state in _jobs."""
-    log_lines = []
+    # Pre-seed log_lines with the initial message already stored in _jobs so it's preserved
+    with _lock:
+        initial_log = _jobs.get(job_id, {}).get("log", "").rstrip("\n")
+    log_lines = [initial_log] if initial_log else []
 
     def _log(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -310,6 +313,8 @@ def _run_etl_job(job_id: str, source_id: str, saved_paths: list[Path], file_key:
                 _jobs[job_id]["log"] = "\n".join(log_lines)
 
     try:
+        _log("▶ Iniciando processamento …")
+
         # Add ETL_DIR to path so imports work
         if str(ETL_DIR) not in sys.path:
             sys.path.insert(0, str(ETL_DIR))
@@ -357,9 +362,9 @@ def _run_etl_job(job_id: str, source_id: str, saved_paths: list[Path], file_key:
             import importlib, etl_pipeline
             importlib.reload(etl_pipeline)
             last_week = (source_id == "pipeline_lw")
-            _log(f"Carregando {len(saved_paths)} arquivo(s) incrementalmente …")
+            _log(f"Carregando {len(saved_paths)} arquivo(s) …")
             t0 = time.time()
-            result = etl_pipeline.run_multi(saved_paths, last_week=last_week)
+            result = etl_pipeline.run_multi(saved_paths, last_week=last_week, log_fn=_log)
             elapsed = time.time() - t0
             _log(f"✓ run_multi: {result}  ({elapsed:.1f}s)")
             total_rows += sum(v for v in result.values() if isinstance(v, int))

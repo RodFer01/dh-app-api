@@ -33,6 +33,9 @@ _ALL_FIELDS = [
     "stage", "risk", "next_step", "next_step_date", "blockers", "notes",
     "deal_qual_status", "presales_status_override", "presales_comments",
     "next_actions", "next_actions_date",
+    "digital_asset",
+    "melody_engagement", "pre_allocated_dsa", "melody_comments",
+    "todo_status", "todo_completion_comments",
 ]
 
 
@@ -48,6 +51,12 @@ class NotesPayload(BaseModel):
     presales_comments: str = ""
     next_actions: str = ""
     next_actions_date: str = ""
+    digital_asset: str = ""
+    melody_engagement: str = ""
+    pre_allocated_dsa: str = ""
+    melody_comments: str = ""
+    todo_status: str = ""
+    todo_completion_comments: str = ""
 
 
 class NextStepPayload(BaseModel):
@@ -97,6 +106,7 @@ def get_notes(opp_id: str, _user=Depends(verify_token)):
         data = {"notes": row["body"]}
     data["opportunity_id"] = opp_id
     data["updated_at"] = row["updated_at"].isoformat() if row["updated_at"] else ""
+    data["author"] = row["author"] or ""
     return data
 
 
@@ -113,6 +123,91 @@ def upsert_notes(opp_id: str, payload: NotesPayload, _user=Depends(verify_token)
         [opp_id, author, body]
     )
     return {"ok": True}
+
+
+@router.get("/todo-activities")
+def get_todo_activities(user_name: Optional[str] = None, _user=Depends(verify_token)):
+    """Return all latest notes that have a next_actions_date set, optionally filtered by author."""
+    rows = query(
+        """SELECT c.opportunity_id, c.author, c.body, c.updated_at
+           FROM comments c
+           INNER JOIN (
+               SELECT opportunity_id, MAX(updated_at) AS max_updated_at
+               FROM comments
+               GROUP BY opportunity_id
+           ) latest ON c.opportunity_id = latest.opportunity_id
+                    AND c.updated_at = latest.max_updated_at""",
+        None
+    )
+
+    placeholders_sql = """
+        SELECT opportunity_id, account_name, opp_description, opp_owner_name,
+               solution_area_l1, sub_solution_area_l2, closing_qtr, acv_total_opp,
+               opp_phase, drm_category, region_lvl3
+        FROM (
+            SELECT opportunity_id, account_name, opp_description, opp_owner_name,
+                   solution_area_l1, sub_solution_area_l2, closing_qtr, acv_total_opp,
+                   opp_phase, drm_category, region_lvl3,
+                   ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY snapshot_week DESC) AS _rn
+            FROM pipeline
+        ) _p WHERE _rn = 1
+    """
+    pip_rows = query(placeholders_sql, None)
+    pip_map = {r["opportunity_id"]: r for r in pip_rows}
+
+    result = []
+    for row in rows:
+        try:
+            data = json.loads(row["body"])
+        except Exception:
+            data = {}
+
+        next_actions_date = data.get("next_actions_date", "")
+        if not next_actions_date:
+            continue
+
+        if user_name and (row["author"] or "").lower() != user_name.lower():
+            continue
+
+        opp_id = row["opportunity_id"]
+        pip = pip_map.get(opp_id, {})
+
+        result.append({
+            "opportunity_id":      opp_id,
+            "author":              row["author"] or "",
+            "updated_at":          row["updated_at"].isoformat() if row["updated_at"] else "",
+            "next_actions":        data.get("next_actions", ""),
+            "next_actions_date":   next_actions_date,
+            "presales_comments":   data.get("presales_comments", ""),
+            "notes":               data.get("notes", ""),
+            "todo_status":         data.get("todo_status", ""),
+            "todo_completion_comments": data.get("todo_completion_comments", ""),
+            "stage":               data.get("stage", ""),
+            "deal_qual_status":    data.get("deal_qual_status", ""),
+            "account_name":        pip.get("account_name", ""),
+            "opp_description":     pip.get("opp_description", ""),
+            "opp_owner_name":      pip.get("opp_owner_name", ""),
+            "solution_area_l1":    pip.get("solution_area_l1", ""),
+            "closing_qtr":         pip.get("closing_qtr", ""),
+            "acv_total_opp":       pip.get("acv_total_opp"),
+            "opp_phase":           pip.get("opp_phase", ""),
+            "drm_category":        pip.get("drm_category", ""),
+        })
+
+    result.sort(key=lambda x: x["next_actions_date"] or "")
+    return result
+
+
+@router.get("/todo-activities/users")
+def get_todo_activity_users(_user=Depends(verify_token)):
+    """Return distinct author names that have any todo activities."""
+    rows = query(
+        """SELECT DISTINCT author FROM comments
+           WHERE author IS NOT NULL AND author != ''
+           ORDER BY author""",
+        None
+    )
+    return [r["author"] for r in rows if r["author"]]
 
 
 @router.get("/notes/{opp_id}/history")

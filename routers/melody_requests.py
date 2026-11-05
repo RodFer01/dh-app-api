@@ -501,6 +501,21 @@ def mr_review_email(
     return {"ok": True, "subject": subject, "html_body": body_html}
 
 
+@router.get("/comments-by-opportunity/{opp_id}")
+def get_all_comments_by_opp(opp_id: str, _user=Depends(verify_token)):
+    """All comments for every MR request linked to a given opportunity_id."""
+    from database import query as db_query
+    rows = db_query("""
+        SELECT c.id, c.req_id_sub, c.body, c.author,
+               TO_NVARCHAR(c.created_at) AS created_at
+        FROM melody_request_comments c
+        JOIN melody_requests mr ON mr.req_id_sub = c.req_id_sub
+        WHERE mr.opportunity_id = ?
+        ORDER BY c.req_id_sub, c.created_at ASC
+    """, [opp_id])
+    return rows
+
+
 @router.get("/by-opportunity/{opp_id}")
 def get_requests_by_opp(opp_id: str, _user=Depends(verify_token)):
     """All MR requests + latest comment for a given opportunity_id."""

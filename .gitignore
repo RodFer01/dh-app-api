@@ -1,25 +1,23 @@
+# Secrets — NEVER commit
+manifest.yml
+.env
+.env.*
+
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
-.env
-.env.*
+.venv/
+venv/
+env/
 *.egg-info/
 dist/
 build/
-.venv/
-venv/
-
-# Sensitive files — NEVER commit
-manifest.yml
-dh_backup_*.sql
-migrate_pg_to_hana.py
-_upload_*.xlsx
-_upload_*.csv
+.pytest_cache/
 
 # Logs
 *.log
-.logs/
 
 # OS
 .DS_Store
+Thumbs.db

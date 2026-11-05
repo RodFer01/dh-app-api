@@ -9,7 +9,7 @@ import time
 
 from auth import login, login_azure, verify_token, decode_token_email
 from fastapi import Depends
-from routers import pipeline, melody, targets, notes, melody_requests, spark, etl, comparison, scheduler, admin, feedback, pptx_export, actions, calendar, idea_zone, ae_analysis, outreach, outlook_inbox, outlook_bridge, campaigns, ess
+from routers import pipeline, melody, targets, notes, melody_requests, spark, etl, comparison, scheduler, admin, feedback, pptx_export, actions, calendar, idea_zone, ae_analysis, outreach, outlook_inbox, outlook_bridge, campaigns, ess, pipeline_progression, partner_analysis
 
 app = FastAPI(title="DH SA Main App API", version="1.0")
 
@@ -380,6 +380,26 @@ def rerun_pipeline_exploded(_user=Depends(verify_token)):
     return {"ok": True, "rows_inserted": rows}
 
 
+@app.post("/api/debug/setup-past-pipeline", tags=["auth"])
+def setup_past_pipeline(_user=Depends(verify_token)):
+    """Create past_pipeline table (if not exists) and populate an initial snapshot from current pipeline data."""
+    import sys, os
+    from pathlib import Path
+    etl_dir = Path(__file__).parent / "etl"
+    if str(etl_dir) not in sys.path:
+        sys.path.insert(0, str(etl_dir))
+    os.chdir(etl_dir)
+    import importlib
+    import etl_past_pipeline
+    importlib.reload(etl_past_pipeline)
+    etl_past_pipeline._ensure_table()
+    n = etl_past_pipeline.run()
+    # Invalidate cached table check in pipeline_progression router
+    from routers import pipeline_progression
+    pipeline_progression._TABLE_EXISTS = None
+    return {"ok": True, "rows_inserted": n}
+
+
 @app.get("/api/auth/me", tags=["auth"])
 def auth_me(current_user=Depends(verify_token)):
     """Return fresh user profile + permissions from DB (bypasses stale localStorage)."""
@@ -422,6 +442,8 @@ app.include_router(outlook_inbox.router)
 app.include_router(outlook_bridge.router)
 app.include_router(campaigns.router)
 app.include_router(ess.router)
+app.include_router(pipeline_progression.router)
+app.include_router(partner_analysis.router)
 
 @app.post("/api/debug/create-campaigns", tags=["auth"])
 def create_campaigns_tables(_user=Depends(verify_token)):

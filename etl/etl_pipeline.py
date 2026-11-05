@@ -328,35 +328,46 @@ def _update_weekly_snapshot(snapshot, pipeline_rows: int):
     log.info("weekly_snapshots updated: %s  (%d rows)", snapshot, pipeline_rows)
 
 
-def run_multi(paths: list, last_week: bool = False) -> dict:
+def run_multi(paths: list, last_week: bool = False, log_fn=None) -> dict:
     """Load pipeline from multiple CSV parts (avoids external merge step)."""
+    def _l(msg):
+        log.info(msg)
+        if log_fn:
+            log_fn(msg)
+
     snapshot = snap_week()
 
+    _l("Conectando ao banco de dados …")
     with get_conn() as conn:
+        _l("Verificando colunas …")
         _ensure_columns(conn)
+        _l("Carregando mapa VAT …")
         dh_names, dh_ids, full_names = _load_vat_maps(conn)
         lobs_inumbers, scm_inumbers  = _load_lobs_info(conn)
+    _l(f"Mapa VAT carregado ({len(dh_names)} opps DH, {len(full_names)} opps full)")
 
     all_raw: list[list] = []
     for path in paths:
+        _l(f"Lendo {Path(path).name} …")
         part_rows = _read_pipeline_csv(path)
-        log.info("  Part %s: %d rows", Path(path).name, len(part_rows))
+        _l(f"  {len(part_rows)} linhas lidas")
         all_raw.extend(part_rows)
 
-    log.info("Merged %d raw rows from %d files", len(all_raw), len(paths))
+    _l(f"Total: {len(all_raw)} linhas de {len(paths)} arquivo(s)")
 
     sample_len = len(all_raw[0]) if all_raw else 0
     if sample_len < 53:
-        log.info("  Compact format (%d cols) — ACV at col 45", sample_len)
+        _l(f"Formato compacto ({sample_len} cols) — ACV na col 45")
         acv_col, min_cols = 45, 46
     else:
         acv_col, min_cols = 52, 53
 
     table = "pipeline_last_week" if last_week else "pipeline"
+    _l("Processando linhas …")
     rows = _build_rows(all_raw, dh_names, dh_ids, full_names,
                        lobs_inumbers, scm_inumbers, snapshot,
                        acv_col=acv_col, min_cols=min_cols)
-    log.info("  %d data rows after parsing", len(rows))
+    _l(f"{len(rows)} linhas processadas")
 
     conflict_cols = ["opportunity_id", "solution_area_l1",
                      "sub_solution_area_l2", "solution_area_l3",
@@ -367,6 +378,16 @@ def run_multi(paths: list, last_week: bool = False) -> dict:
                          "sub_solution_area_l2", "solution_area_l3",
                          "solution_area_l4"]
 
+    if not last_week:
+        try:
+            import etl_past_pipeline
+            _l("Salvando snapshot em past_pipeline …")
+            n_past = etl_past_pipeline.run()
+            _l(f"past_pipeline: {n_past} linhas salvas")
+        except Exception as e:
+            _l(f"Aviso: past_pipeline falhou ({e}), continuando …")
+
+    _l("Gravando no banco de dados …")
     with get_conn() as conn:
         if last_week:
             with conn.cursor() as cur:
@@ -386,11 +407,10 @@ def run_multi(paths: list, last_week: bool = False) -> dict:
                     [snapshot] + batch,
                 )
                 deleted += cur.rowcount if hasattr(cur, "rowcount") else 0
-            log.info("Smart-cleared %d opp_ids (%d rows) for %s before reload",
-                     len(opp_ids), deleted, snapshot)
+            _l(f"Removidas {deleted} linhas para {len(opp_ids)} oportunidades antes da recarga")
         n = upsert(conn, table, rows, conflict_cols)
 
-    log.info("%s: %d rows upserted", table, n)
+    _l(f"{table}: {n} linhas gravadas")
 
     if not last_week:
         # Count total rows now in pipeline for this snapshot (may span multiple uploads)
@@ -399,6 +419,7 @@ def run_multi(paths: list, last_week: bool = False) -> dict:
             cur.execute("SELECT COUNT(*) FROM pipeline WHERE snapshot_week = ?", [snapshot])
             total_rows = cur.fetchone()[0]
         _update_weekly_snapshot(snapshot, total_rows)
+        _l(f"Snapshot semanal atualizado: {total_rows} linhas totais")
 
     return {table: n}
 

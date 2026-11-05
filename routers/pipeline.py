@@ -56,7 +56,7 @@ def _build_where(
     local_owner=None, acc_sub_segment=None, sde_owner=None,
     snapshot_week=None, table="pipeline",
     # Multi-value versions (lists)
-    closing_qtrs=None, regions=None, sol_l1s=None, sol_l2s=None,
+    closing_qtrs=None, regions=None, region_lvl4s=None, sol_l1s=None, sol_l2s=None,
     drms=None, opp_phases=None, fcs=None, opp_owners=None,
     qual_decisions=None, iss_groups=None, iacs=None, flsms=None,
     local_owners=None, acc_sub_segments=None,
@@ -81,7 +81,7 @@ def _build_where(
     # Multi-value filters take priority over single-value
     _multi_filter("closing_qtr",                    closing_qtrs or ([closing_qtr] if closing_qtr else []), clauses, params)
     _multi_filter("region_lvl3",                    regions or ([region] if region else []), clauses, params)
-    _multi_filter("region_lvl4",                    [] if not region_lvl4 else [region_lvl4], clauses, params)
+    _multi_filter("region_lvl4", region_lvl4s or ([] if not region_lvl4 else [region_lvl4]), clauses, params)
     _multi_filter("solution_area_l1",               sol_l1s or ([sol_l1] if sol_l1 else []), clauses, params)
     _multi_filter("sub_solution_area_l2",           sol_l2s or ([sol_l2] if sol_l2 else []), clauses, params)
     _multi_filter("drm_category",                   drms or ([drm] if drm else []), clauses, params)
@@ -209,6 +209,42 @@ def _apply_fin_sub_type(where: str, fin_sub_type: Optional[str]) -> str:
     return (where + " AND " + subq) if where else ("WHERE " + subq)
 
 
+def _apply_opp_extra_filters(
+    where: str, params: list,
+    dda_statuses=None, range_agings=None,
+    priorities=None, probability_min=None, probability_max=None,
+) -> str:
+    """Filters stored outside the pipeline table (DDA, opportunity_priorities).
+    Same semantics as the table endpoint (GET /api/pipeline), so table, KPIs and
+    charts always see the same set of opportunities. Mutates params in place."""
+    def _add(clause: str):
+        nonlocal where
+        where = (where + " AND " if where else "WHERE ") + clause
+
+    dda_statuses = [v for v in (dda_statuses or []) if v]
+    range_agings = [v for v in (range_agings or []) if v]
+    priorities   = [int(v) for v in (priorities or []) if v is not None]
+    if dda_statuses:
+        ph = ",".join(["%s"] * len(dda_statuses))
+        _add(f"opportunity_id IN (SELECT opp_id FROM dda WHERE dda_status IN ({ph}))")
+        params.extend(dda_statuses)
+    if range_agings:
+        ph = ",".join(["%s"] * len(range_agings))
+        _add(f"opportunity_id IN (SELECT opp_id FROM dda WHERE range_aging IN ({ph}))")
+        params.extend(range_agings)
+    if priorities:
+        ph = ",".join(["%s"] * len(priorities))
+        _add(f"opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE priority IN ({ph}))")
+        params.extend(priorities)
+    if probability_min is not None:
+        _add("opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE probability_pct >= %s)")
+        params.append(float(probability_min))
+    if probability_max is not None:
+        _add("opportunity_id IN (SELECT opportunity_id FROM opportunity_priorities WHERE probability_pct <= %s)")
+        params.append(float(probability_max))
+    return where
+
+
 @router.get("/kpis")
 def pipeline_kpis(
     snapshot_week: Optional[str] = None,
@@ -238,15 +274,30 @@ def pipeline_kpis(
     local_owners: List[str] = Query(default=[]),
     flsms: List[str] = Query(default=[]),
     iss_groups: List[str] = Query(default=[]),
+    iacs: List[str] = Query(default=[]),
     acc_sub_segments: List[str] = Query(default=[]),
     qual_decisions: List[str] = Query(default=[]),
     channel_partners: List[str] = Query(default=[]),
     presales_statuses: List[str] = Query(default=[]),
+    iaes: List[str] = Query(default=[]),
+    spec_cxs: List[str] = Query(default=[]),
+    spec_hxms: List[str] = Query(default=[]),
+    spec_procurements: List[str] = Query(default=[]),
+    spec_dscs: List[str] = Query(default=[]),
+    spec_btps: List[str] = Query(default=[]),
+    spec_bdcs: List[str] = Query(default=[]),
+    spec_fins: List[str] = Query(default=[]),
+    spec_pros: List[str] = Query(default=[]),
     exclude_neg: bool = False,
     include_purchase: bool = False,
     deal_type: Optional[str] = None,
     fin_sub_type: Optional[str] = None,
     stall_days: int = 90,
+    dda_statuses: List[str] = Query(default=[]),
+    range_agings: List[str] = Query(default=[]),
+    priorities: List[int] = Query(default=[]),
+    probability_min: Optional[float] = None,
+    probability_max: Optional[float] = None,
     acv_min: Optional[float] = None,
     acv_max: Optional[float] = None,
     _user=Depends(verify_token),
@@ -257,17 +308,25 @@ def pipeline_kpis(
         drm=drm, opp_phase=opp_phase, fc=fc, engagement_type=engagement_type,
         opp_owner=opp_owner, digital_sa=digital_sa, search=search,
         snapshot_week=snapshot_week,
-        closing_qtrs=closing_qtrs, regions=regions, region_lvl4=None,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
         sol_l1s=sol_l1s, sol_l2s=sol_l2s,
         drms=drms, opp_phases=opp_phases, fcs=fcs,
-        opp_owners=opp_owners, engagement_types=engagement_types, digital_sas=digital_sas, local_owners=local_owners, flsms=flsms,
-        iss_groups=iss_groups, acc_sub_segments=acc_sub_segments,
+        opp_owners=opp_owners, engagement_types=engagement_types, digital_sas=digital_sas,
+        local_owners=local_owners, flsms=flsms,
+        iss_groups=iss_groups, iacs=iacs, acc_sub_segments=acc_sub_segments,
         qual_decisions=qual_decisions,
         channel_partners=channel_partners,
         presales_statuses=presales_statuses,
+        iaes=iaes, spec_cxs=spec_cxs, spec_hxms=spec_hxms, spec_procurements=spec_procurements,
+        spec_dscs=spec_dscs, spec_btps=spec_btps, spec_bdcs=spec_bdcs,
+        spec_fins=spec_fins, spec_pros=spec_pros,
     )
     where = _apply_deal_type(where, deal_type)
     where = _apply_fin_sub_type(where, fin_sub_type)
+    where = _apply_opp_extra_filters(
+        where, params, dda_statuses=dda_statuses, range_agings=range_agings,
+        priorities=priorities, probability_min=probability_min, probability_max=probability_max,
+    )
     if acv_min is not None:
         where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
         params.append(float(acv_min))
@@ -599,73 +658,114 @@ def dda_charts(
     opp_owner: Optional[str] = None,
     digital_sa: Optional[str] = None,
     flsm: Optional[str] = None,
+    search: Optional[str] = None,
     closing_qtrs: List[str] = Query(default=[]),
     regions: List[str] = Query(default=[]),
+    region_lvl4s: List[str] = Query(default=[]),
     sol_l1s: List[str] = Query(default=[]),
     sol_l2s: List[str] = Query(default=[]),
     drms: List[str] = Query(default=[]),
+    opp_phases: List[str] = Query(default=[]),
+    fcs: List[str] = Query(default=[]),
     engagement_types: List[str] = Query(default=[]),
     opp_owners: List[str] = Query(default=[]),
     digital_sas: List[str] = Query(default=[]),
     flsms: List[str] = Query(default=[]),
+    local_owners: List[str] = Query(default=[]),
     channel_partners: List[str] = Query(default=[]),
     qual_decisions: List[str] = Query(default=[]),
     iss_groups: List[str] = Query(default=[]),
+    iacs: List[str] = Query(default=[]),
+    acc_sub_segments: List[str] = Query(default=[]),
+    presales_statuses: List[str] = Query(default=[]),
+    iaes: List[str] = Query(default=[]),
+    spec_cxs: List[str] = Query(default=[]),
+    spec_hxms: List[str] = Query(default=[]),
+    spec_procurements: List[str] = Query(default=[]),
+    spec_dscs: List[str] = Query(default=[]),
+    spec_btps: List[str] = Query(default=[]),
+    spec_bdcs: List[str] = Query(default=[]),
+    spec_fins: List[str] = Query(default=[]),
+    spec_pros: List[str] = Query(default=[]),
+    deal_type: Optional[str] = None,
+    exclude_neg: bool = False,
+    priorities: List[int] = Query(default=[]),
+    probability_min: Optional[float] = None,
+    probability_max: Optional[float] = None,
+    acv_min: Optional[float] = None,
+    acv_max: Optional[float] = None,
     dda_statuses: List[str] = Query(default=[]),
     range_agings: List[str] = Query(default=[]),
     _user=Depends(verify_token),
 ):
-    """Aggregations for DDA Status and Range Aging charts — uses full pipeline filter set."""
+    """Aggregations for DDA Status and Range Aging charts — uses the same
+    pipeline filter set as /kpis, /charts and the table endpoint."""
     where, params = _build_where(
         snapshot_week=snapshot_week,
         closing_qtr=closing_qtr, region=region, sol_l1=sol_l1, drm=drm,
-        engagement_type=engagement_type, opp_owner=opp_owner, digital_sa=digital_sa, flsm=flsm,
-        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, sol_l2s=sol_l2s,
-        drms=drms, engagement_types=engagement_types, opp_owners=opp_owners,
-        digital_sas=digital_sas, flsms=flsms, channel_partners=channel_partners,
-        qual_decisions=qual_decisions, iss_groups=iss_groups,
+        engagement_type=engagement_type, opp_owner=opp_owner, digital_sa=digital_sa,
+        flsm=flsm, search=search,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s,
+        drms=drms, opp_phases=opp_phases, fcs=fcs,
+        engagement_types=engagement_types, opp_owners=opp_owners,
+        digital_sas=digital_sas, flsms=flsms, local_owners=local_owners,
+        channel_partners=channel_partners, qual_decisions=qual_decisions,
+        iss_groups=iss_groups, iacs=iacs, acc_sub_segments=acc_sub_segments,
+        presales_statuses=presales_statuses,
+        iaes=iaes, spec_cxs=spec_cxs, spec_hxms=spec_hxms, spec_procurements=spec_procurements,
+        spec_dscs=spec_dscs, spec_btps=spec_btps, spec_bdcs=spec_bdcs,
+        spec_fins=spec_fins, spec_pros=spec_pros,
     )
-    # Replace "WHERE" prefix — we need "p." aliased version
-    p_where = where.replace("WHERE ", "WHERE p.").replace(" AND ", " AND p.") if where else ""
-    # Fix presales subquery alias that _build_where may add
-    p_where = p_where.replace("p.EXISTS", "EXISTS").replace("p.NOT EXISTS", "NOT EXISTS")
+    where = _apply_deal_type(where, deal_type)
+    # DDA status / range aging are applied on the dda table below, not here.
+    where = _apply_opp_extra_filters(
+        where, params, priorities=priorities,
+        probability_min=probability_min, probability_max=probability_max,
+    )
+    if acv_min is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
+        params.append(float(acv_min))
+    if acv_max is not None:
+        where = (where + " AND " if where else "WHERE ") + "acv_total_opp <= %s"
+        params.append(float(acv_max))
+    neg_filter = ("AND " if where else "WHERE ") + "acv_usd > 0" if exclude_neg else ""
 
     dda_clauses: list = []
     dda_params: list = []
+    dda_statuses = [v for v in dda_statuses if v]
+    range_agings = [v for v in range_agings if v]
     if dda_statuses:
         ph = ",".join(["%s"] * len(dda_statuses))
         dda_clauses.append(f"d.dda_status IN ({ph})"); dda_params.extend(dda_statuses)
     if range_agings:
         ph = ",".join(["%s"] * len(range_agings))
         dda_clauses.append(f"d.range_aging IN ({ph})"); dda_params.extend(range_agings)
-
     dda_extra = (" AND " + " AND ".join(dda_clauses)) if dda_clauses else ""
     all_params = params + dda_params
 
-    # If no pipeline filters at all, add the snapshot clause
-    if not p_where:
-        p_where = "WHERE p.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)"
-    elif "snapshot_week" not in p_where:
-        p_where += " AND p.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)"
+    # Filtered opportunity set computed once in a subquery, so _build_where's
+    # clauses (LIKE, EXISTS, sub-selects) never need table-alias rewriting.
+    opps_cte = f"WITH opps AS (SELECT DISTINCT opportunity_id FROM pipeline {where} {neg_filter})"
 
     by_dda_status = query(f"""
+        {opps_cte}
         SELECT d.dda_status AS label,
-               COUNT(DISTINCT p.opportunity_id) AS n_opps
-        FROM pipeline p
-        JOIN dda d ON d.opp_id = p.opportunity_id
-        {p_where}
-          AND d.dda_status IS NOT NULL
+               COUNT(DISTINCT o.opportunity_id) AS n_opps
+        FROM opps o
+        JOIN dda d ON d.opp_id = o.opportunity_id
+        WHERE d.dda_status IS NOT NULL
           {dda_extra}
         GROUP BY d.dda_status ORDER BY n_opps DESC
     """, all_params or None)
 
     by_range_aging = query(f"""
+        {opps_cte}
         SELECT d.range_aging AS label,
-               COUNT(DISTINCT p.opportunity_id) AS n_opps
-        FROM pipeline p
-        JOIN dda d ON d.opp_id = p.opportunity_id
-        {p_where}
-          AND d.range_aging IS NOT NULL
+               COUNT(DISTINCT o.opportunity_id) AS n_opps
+        FROM opps o
+        JOIN dda d ON d.opp_id = o.opportunity_id
+        WHERE d.range_aging IS NOT NULL
           {dda_extra}
         GROUP BY d.range_aging ORDER BY n_opps DESC
     """, all_params or None)
@@ -702,6 +802,7 @@ def get_pipeline(
     # Multi-value filters
     closing_qtrs: List[str] = Query(default=[]),
     regions: List[str] = Query(default=[]),
+    region_lvl4s: List[str] = Query(default=[]),
     sol_l1s: List[str] = Query(default=[]),
     sol_l2s: List[str] = Query(default=[]),
     drms: List[str] = Query(default=[]),
@@ -750,7 +851,8 @@ def get_pipeline(
         qual_decision=qual_decision, iss_group=iss_group, iac=iac, flsm=flsm,
         local_owner=local_owner, acc_sub_segment=acc_sub_segment, sde_owner=sde_owner,
         snapshot_week=snapshot_week,
-        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, sol_l2s=sol_l2s,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s,
         drms=drms, opp_phases=opp_phases, fcs=fcs, opp_owners=opp_owners, engagement_types=engagement_types, digital_sas=digital_sas,
         qual_decisions=qual_decisions, iss_groups=iss_groups, iacs=iacs, flsms=flsms,
         local_owners=local_owners, acc_sub_segments=acc_sub_segments,
@@ -1384,14 +1486,26 @@ def get_pipeline_prev(
     fcs:              List[str] = Query(default=[]),
     digital_sas:      List[str] = Query(default=[]),
     search:           Optional[str] = None,
+    engagement_type:  Optional[str] = None,
+    digital_sa:       Optional[str] = None,
+    region_lvl4s:     List[str] = Query(default=[]),
+    sol_l2s:          List[str] = Query(default=[]),
+    opp_phases:       List[str] = Query(default=[]),
+    qual_decisions:   List[str] = Query(default=[]),
+    iss_groups:       List[str] = Query(default=[]),
+    flsms:            List[str] = Query(default=[]),
+    acc_sub_segments: List[str] = Query(default=[]),
     _user=Depends(verify_token),
 ):
     where, params = _build_where(
         closing_qtr=closing_qtr, region=region, sol_l1=sol_l1, drm=drm,
-        search=search,
-        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s,
-        drms=drms, engagement_types=engagement_types,
+        search=search, engagement_type=engagement_type, digital_sa=digital_sa,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s,
+        drms=drms, opp_phases=opp_phases, engagement_types=engagement_types,
         opp_owners=opp_owners, fcs=fcs, digital_sas=digital_sas,
+        qual_decisions=qual_decisions, iss_groups=iss_groups, flsms=flsms,
+        acc_sub_segments=acc_sub_segments,
         table="pipeline_last_week",
     )
     sql = f"""
@@ -1438,13 +1552,28 @@ def pipeline_charts(
     local_owners: List[str] = Query(default=[]),
     flsms: List[str] = Query(default=[]),
     iss_groups: List[str] = Query(default=[]),
+    iacs: List[str] = Query(default=[]),
     acc_sub_segments: List[str] = Query(default=[]),
     qual_decisions: List[str] = Query(default=[]),
     channel_partners: List[str] = Query(default=[]),
     presales_statuses: List[str] = Query(default=[]),
+    iaes: List[str] = Query(default=[]),
+    spec_cxs: List[str] = Query(default=[]),
+    spec_hxms: List[str] = Query(default=[]),
+    spec_procurements: List[str] = Query(default=[]),
+    spec_dscs: List[str] = Query(default=[]),
+    spec_btps: List[str] = Query(default=[]),
+    spec_bdcs: List[str] = Query(default=[]),
+    spec_fins: List[str] = Query(default=[]),
+    spec_pros: List[str] = Query(default=[]),
     deal_type: Optional[str] = None,
     acv_min: Optional[float] = None,
     acv_max: Optional[float] = None,
+    dda_statuses: List[str] = Query(default=[]),
+    range_agings: List[str] = Query(default=[]),
+    priorities: List[int] = Query(default=[]),
+    probability_min: Optional[float] = None,
+    probability_max: Optional[float] = None,
     _user=Depends(verify_token),
 ):
     """
@@ -1456,16 +1585,24 @@ def pipeline_charts(
         drm=drm, opp_phase=opp_phase, fc=fc, engagement_type=engagement_type,
         opp_owner=opp_owner, digital_sa=digital_sa, search=search,
         snapshot_week=snapshot_week,
-        closing_qtrs=closing_qtrs, regions=regions, region_lvl4=None,
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
         sol_l1s=sol_l1s, sol_l2s=sol_l2s,
         drms=drms, opp_phases=opp_phases, fcs=fcs,
-        opp_owners=opp_owners, engagement_types=engagement_types, digital_sas=digital_sas, local_owners=local_owners, flsms=flsms,
-        iss_groups=iss_groups, acc_sub_segments=acc_sub_segments,
+        opp_owners=opp_owners, engagement_types=engagement_types, digital_sas=digital_sas,
+        local_owners=local_owners, flsms=flsms,
+        iss_groups=iss_groups, iacs=iacs, acc_sub_segments=acc_sub_segments,
         qual_decisions=qual_decisions,
         channel_partners=channel_partners,
         presales_statuses=presales_statuses,
+        iaes=iaes, spec_cxs=spec_cxs, spec_hxms=spec_hxms, spec_procurements=spec_procurements,
+        spec_dscs=spec_dscs, spec_btps=spec_btps, spec_bdcs=spec_bdcs,
+        spec_fins=spec_fins, spec_pros=spec_pros,
     )
     where = _apply_deal_type(where, deal_type)
+    where = _apply_opp_extra_filters(
+        where, params, dda_statuses=dda_statuses, range_agings=range_agings,
+        priorities=priorities, probability_min=probability_min, probability_max=probability_max,
+    )
     if acv_min is not None:
         where = (where + " AND " if where else "WHERE ") + "acv_total_opp >= %s"
         params.append(float(acv_min))
