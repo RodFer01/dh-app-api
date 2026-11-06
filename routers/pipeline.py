@@ -32,6 +32,55 @@ class ShadowComment(BaseModel):
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
+_PH = "?" if IS_HANA else "%s"
+
+
+@router.get("/account/{account_bp}")
+def pipeline_by_account(account_bp: str, _user=Depends(verify_token)):
+    """Return AE, FLSM, SDE and open opportunities for a specific account BP ID.
+
+    Used by Intelligence domain-enrichment to resolve team info without fuzzy name search.
+    """
+    rows = query(f"""
+        SELECT
+            opportunity_id, opp_phase, opp_owner_name, opp_owner_email,
+            flsm, sde_current_territory_owner, solution_area_l1,
+            sub_solution_area_l2, acv_usd, closing_qtr, drm_category,
+            region_lvl2, region_lvl3, region_lvl4
+        FROM pipeline
+        WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+          AND account_bp = {_PH}
+        ORDER BY acv_usd DESC NULLS LAST
+        LIMIT 20
+    """, [account_bp])
+
+    open_opps  = [r for r in rows if (r.get("drm_category") or "").lower() not in
+                  ("disc/lost", "booked/won", "excluded from pipeline")]
+    ae_names   = list({r["opp_owner_name"] for r in open_opps if r.get("opp_owner_name")})
+    ae_emails  = list({r["opp_owner_email"] for r in open_opps if r.get("opp_owner_email")})
+    flsms      = list({r["flsm"] for r in open_opps if r.get("flsm")})
+    sdes       = list({r["sde_current_territory_owner"] for r in open_opps
+                       if r.get("sde_current_territory_owner")})
+    regions    = list({r["region_lvl2"] or r["region_lvl3"] or r["region_lvl4"]
+                       for r in open_opps
+                       if r.get("region_lvl2") or r.get("region_lvl3") or r.get("region_lvl4")})
+
+    return {
+        "account_bp":   account_bp,
+        "open_opps":    len(open_opps),
+        "ae":           ae_names[0] if ae_names else None,
+        "ae_email":     ae_emails[0] if ae_emails else None,
+        "flsm":         flsms[0] if flsms else None,
+        "sde":          sdes[0] if sdes else None,
+        "region":       regions[0] if regions else None,
+        "aes":          ae_names,
+        "ae_emails":    ae_emails,
+        "flsms":        flsms,
+        "sdes":         sdes,
+        "regions":      regions,
+        "opportunities": rows,
+    }
+
 
 def _multi_filter(field: str, values: list, clauses: list, params: list):
     """Add an IN clause for multi-value filter, or = for single value."""

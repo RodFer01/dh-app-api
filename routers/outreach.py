@@ -273,8 +273,9 @@ def get_contacts(account_bp: str, _user=Depends(verify_token)):
 def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
     """Return best-match account + team info for an email domain (e.g. 'vale.com.br').
 
-    Finds outreach contacts whose email ends with @{domain}, joins to pipeline,
-    and returns the account with the most open pipeline as the primary match.
+    Finds outreach contacts whose email ends with @{domain}, joins to pipeline
+    (any snapshot row — not filtered by phase so closed/won accounts still match),
+    and returns the account with the most pipeline rows as the primary match.
     """
     like = f"%@{domain}"
     rows = query(f"""
@@ -285,17 +286,16 @@ def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
             MAX(p.opp_owner_email)             AS ae_email,
             MAX(p.flsm)                        AS flsm,
             MAX(p.sde_current_territory_owner) AS sde,
-            COUNT(DISTINCT p.opportunity_id)   AS open_opps
+            COUNT(DISTINCT p.opportunity_id)   AS pipeline_opps
         FROM outreach_contacts oc
         JOIN (
             SELECT account_bp, account_name, opp_owner_name, opp_owner_email,
-                   flsm, sde_current_territory_owner, opportunity_id, drm_category
+                   flsm, sde_current_territory_owner, opportunity_id
             FROM pipeline
             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
               AND account_bp IS NOT NULL
         ) p ON p.account_bp = oc.account_bpid
         WHERE LOWER(oc.email) LIKE LOWER({_PH})
-          AND p.drm_category NOT IN ('Disc/Lost', 'Booked/Won', 'Excluded from Pipeline')
         GROUP BY oc.account_bpid
         ORDER BY COUNT(DISTINCT p.opportunity_id) DESC
         LIMIT 5
@@ -314,7 +314,7 @@ def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
             "ae_email":      best["ae_email"],
             "flsm":          best["flsm"],
             "sde":           best["sde"],
-            "open_opps":     best["open_opps"],
+            "pipeline_opps": best["pipeline_opps"],
         },
         "candidates": rows,
     }
