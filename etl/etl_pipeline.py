@@ -165,6 +165,93 @@ def _read_pipeline_csv(path) -> list[list]:
     return rows
 
 
+def _stream_pipeline_csv(path):
+    """Generator version of _read_pipeline_csv — yields one row at a time without loading all into memory."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f):
+            if i <= 1:
+                continue
+            parts = line.rstrip("\n").split(";")
+            if len(parts) > 4 and parts[4].strip() in ('Opportunity ID', 'Opp ID', ''):
+                continue
+            yield parts
+
+
+def _build_one_row(parts, acv_by_opp, dh_names, dh_ids, full_names,
+                   lobs_inumbers, scm_inumbers, snapshot, acv_col) -> dict:
+    """Build a single pipeline row dict. Requires acv_by_opp pre-computed across all files."""
+    def _get(i):
+        return parts[i] if len(parts) > i else ''
+
+    opp_id      = clean_str(parts[4])
+    dh_list     = dh_names.get(opp_id, [])
+    full_list   = full_names.get(opp_id, [])
+    vat_size    = _calc_vat_size(opp_id, dh_ids, lobs_inumbers, scm_inumbers)
+    acv_total   = acv_by_opp.get(opp_id, 0) or None
+    acv_usd     = clean_num(parts[acv_col])
+    acv_usd     = acv_usd * 1000 if acv_usd is not None else None
+    acv_per_vat = (acv_total / vat_size) if (acv_total and vat_size) else None
+
+    return {
+        "region_lvl1":                    clean_str(parts[0]),
+        "region_lvl2":                    clean_str(parts[1]),
+        "region_lvl3":                    clean_str(parts[2]),
+        "region_lvl4":                    clean_str(parts[3]),
+        "opportunity_id":                 opp_id,
+        "account_name":                   clean_str(parts[5]),
+        "opp_description":                clean_str(parts[6]),
+        "opp_owner_name":                 clean_str(parts[7]),
+        "phase_since_days":               clean_int(parts[8]),
+        "fc_qualification":               clean_str(parts[9]),
+        "opp_phase":                      clean_str(parts[10]),
+        "closing_qtr":                    clean_str(parts[11]),
+        "closing_date":                   clean_date(parts[13]),
+        "age_days":                       clean_int(parts[15]),
+        "phase_aging":                    clean_str(parts[16]),
+        "phase_since_date":               clean_date(parts[17]),
+        "untouched_days":                 clean_int(parts[19]),
+        "distribution_channel":           clean_str(parts[20]),
+        "channel_manager":                clean_str(parts[21]),
+        "channel_partner":                clean_str(parts[22]),
+        "opp_campaign_text":              clean_str(parts[23]),
+        "solution_area_l1":               clean_str(parts[24]),
+        "sub_solution_area_l2":           clean_str(parts[25]),
+        "solution_area_l3":               clean_str(parts[26]),
+        "solution_area_l4":               clean_str(parts[27]),
+        "drm_category":                   clean_str(parts[28]),
+        "iss_group_text":                 clean_str(parts[29]),
+        "sde_current_territory_owner":    clean_str(parts[30]),
+        "pipe_build_type_text":           clean_str(parts[31]),
+        "deal_qualification_decision":    clean_str(parts[32]),
+        "deal_qualification_score":       clean_num(parts[33]),
+        "qualification_reviewer":         clean_str(parts[34]),
+        "qualification_date":             clean_date(parts[35]),
+        "sde_handover_date":              clean_date(_get(37)),
+        "local_acct_owner":               clean_str(_get(38)),
+        "account_planned_archetype_text": clean_str(_get(39)),
+        "account_sales_group_text":       clean_str(_get(40)),
+        "iac":                            clean_str(_get(41)),
+        "opp_origin":                     clean_str(_get(42)),
+        "flsm":                           clean_str(_get(43)),
+        "mm_pipe_source":                 clean_str(_get(44)),
+        "sde_initial_engagement_date":    clean_date(_get(45)) if acv_col == 52 else None,
+        "sde_primary_engagement_name":    clean_str(_get(46))  if acv_col == 52 else None,
+        "sde_handover_name":              clean_str(_get(47))  if acv_col == 52 else None,
+        "sic_code":                       clean_str(_get(48))  if acv_col == 52 else None,
+        "sic_description":                clean_str(_get(49))  if acv_col == 52 else None,
+        "sap_mastercode":                 clean_str(_get(50))  if acv_col == 52 else None,
+        "account_bp":                     clean_str(_get(51))  if acv_col == 52 else None,
+        "acv_usd":                        acv_usd,
+        "vat_dh":                         ", ".join(dh_list)   or None,
+        "vat_full":                       ", ".join(full_list) or None,
+        "engagement_type":                _calc_engagement_type(opp_id, dh_names, full_names),
+        "vat_size":                       vat_size,
+        "acv_total_opp":                  acv_total,
+        "acv_per_vat":                    acv_per_vat,
+        "snapshot_week":                  snapshot,
+    }
+
+
 def _build_rows(raw_rows: list[list], dh_names: dict, dh_ids: dict,
                 full_names: dict, lobs_inumbers: set, scm_inumbers: set,
                 snapshot: object, acv_col: int = 52, min_cols: int = 53) -> list[dict]:
@@ -329,7 +416,7 @@ def _update_weekly_snapshot(snapshot, pipeline_rows: int):
 
 
 def run_multi(paths: list, last_week: bool = False, log_fn=None) -> dict:
-    """Load pipeline from multiple CSV parts (avoids external merge step)."""
+    """Load pipeline from multiple CSV parts using two-pass streaming to avoid OOM on large files."""
     def _l(msg):
         log.info(msg)
         if log_fn:
@@ -346,37 +433,68 @@ def run_multi(paths: list, last_week: bool = False, log_fn=None) -> dict:
         lobs_inumbers, scm_inumbers  = _load_lobs_info(conn)
     _l(f"Mapa VAT carregado ({len(dh_names)} opps DH, {len(full_names)} opps full)")
 
-    all_raw: list[list] = []
+    # -- Pass 1: detect format + compute acv_by_opp + collect opp_ids (streaming) --
+    _l("Passagem 1: analisando arquivos …")
+    acv_by_opp: dict[str, float] = defaultdict(float)
+    all_opp_ids: set[str] = set()
+    acv_col, min_cols = 52, 53
+    total_raw = 0
+
     for path in paths:
         _l(f"Lendo {Path(path).name} …")
-        part_rows = _read_pipeline_csv(path)
-        _l(f"  {len(part_rows)} linhas lidas")
-        all_raw.extend(part_rows)
+        first_row = True
+        count = 0
+        for parts in _stream_pipeline_csv(path):
+            if first_row:
+                if len(parts) < 53:
+                    _l(f"  Formato compacto ({len(parts)} cols) — ACV na col 45")
+                    acv_col, min_cols = 45, 46
+                first_row = False
+            count += 1
+            if len(parts) < min_cols:
+                continue
+            opp_id = clean_str(parts[4])
+            if not opp_id:
+                continue
+            all_opp_ids.add(opp_id)
+            acv_k = clean_num(parts[acv_col])
+            acv   = acv_k * 1000 if acv_k is not None else None
+            if acv:
+                acv_by_opp[opp_id] += acv
+        _l(f"  {count} linhas")
+        total_raw += count
 
-    _l(f"Total: {len(all_raw)} linhas de {len(paths)} arquivo(s)")
-
-    sample_len = len(all_raw[0]) if all_raw else 0
-    if sample_len < 53:
-        _l(f"Formato compacto ({sample_len} cols) — ACV na col 45")
-        acv_col, min_cols = 45, 46
-    else:
-        acv_col, min_cols = 52, 53
+    _l(f"Passagem 1 completa: {total_raw} linhas, {len(all_opp_ids)} oportunidades únicas")
 
     table = "pipeline_last_week" if last_week else "pipeline"
-    _l("Processando linhas …")
-    rows = _build_rows(all_raw, dh_names, dh_ids, full_names,
-                       lobs_inumbers, scm_inumbers, snapshot,
-                       acv_col=acv_col, min_cols=min_cols)
-    _l(f"{len(rows)} linhas processadas")
-
     conflict_cols = ["opportunity_id", "solution_area_l1",
                      "sub_solution_area_l2", "solution_area_l3",
                      "solution_area_l4", "snapshot_week"]
-
     if last_week:
         conflict_cols = ["opportunity_id", "solution_area_l1",
                          "sub_solution_area_l2", "solution_area_l3",
                          "solution_area_l4"]
+
+    # -- Pre-clean table -------------------------------------------------------
+    if last_week:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE pipeline_last_week")
+        _l("pipeline_last_week truncada")
+    else:
+        opp_ids_list = list(all_opp_ids)
+        with get_conn() as conn:
+            cur = conn.cursor()
+            deleted = 0
+            for i in range(0, len(opp_ids_list), 500):
+                batch_ids = opp_ids_list[i:i + 500]
+                ph = ",".join("?" for _ in batch_ids)
+                cur.execute(
+                    f"DELETE FROM pipeline WHERE snapshot_week = ? AND opportunity_id IN ({ph})",
+                    [snapshot] + batch_ids,
+                )
+                deleted += cur.rowcount if hasattr(cur, "rowcount") else 0
+        _l(f"Removidas {deleted} linhas para {len(all_opp_ids)} oportunidades")
 
     if not last_week:
         try:
@@ -387,33 +505,40 @@ def run_multi(paths: list, last_week: bool = False, log_fn=None) -> dict:
         except Exception as e:
             _l(f"Aviso: past_pipeline falhou ({e}), continuando …")
 
-    _l("Gravando no banco de dados …")
-    with get_conn() as conn:
-        if last_week:
-            with conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE pipeline_last_week")
-        else:
-            # Smart delete: only remove rows whose opportunity_id is in THIS upload.
-            # Allows multiple partial-file uploads to accumulate for the same snapshot_week
-            # instead of each one wiping all previous data.
-            opp_ids = list({r["opportunity_id"] for r in rows if r.get("opportunity_id")})
-            cur = conn.cursor()
-            deleted = 0
-            for i in range(0, len(opp_ids), 500):
-                batch = opp_ids[i:i + 500]
-                ph = ",".join("?" for _ in batch)
-                cur.execute(
-                    f"DELETE FROM pipeline WHERE snapshot_week = ? AND opportunity_id IN ({ph})",
-                    [snapshot] + batch,
-                )
-                deleted += cur.rowcount if hasattr(cur, "rowcount") else 0
-            _l(f"Removidas {deleted} linhas para {len(opp_ids)} oportunidades antes da recarga")
-        n = upsert(conn, table, rows, conflict_cols)
+    # -- Pass 2: stream → build one row at a time → upsert in chunks -----------
+    CHUNK = 2_000
+    _l(f"Passagem 2: processando e gravando em lotes de {CHUNK} …")
+    n_total    = 0
+    seen_keys: set = set()
+    batch:     list[dict] = []
 
-    _l(f"{table}: {n} linhas gravadas")
+    for path in paths:
+        for parts in _stream_pipeline_csv(path):
+            if len(parts) < min_cols:
+                continue
+            opp_id = clean_str(parts[4])
+            if not opp_id:
+                continue
+            row = _build_one_row(parts, acv_by_opp, dh_names, dh_ids, full_names,
+                                  lobs_inumbers, scm_inumbers, snapshot, acv_col)
+            key = tuple(row.get(c) for c in conflict_cols)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            batch.append(row)
+            if len(batch) >= CHUNK:
+                with get_conn() as conn:
+                    n_total += upsert(conn, table, batch, conflict_cols)
+                batch.clear()
+
+    if batch:
+        with get_conn() as conn:
+            n_total += upsert(conn, table, batch, conflict_cols)
+        batch.clear()
+
+    _l(f"{table}: {n_total} linhas gravadas")
 
     if not last_week:
-        # Count total rows now in pipeline for this snapshot (may span multiple uploads)
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM pipeline WHERE snapshot_week = ?", [snapshot])
@@ -421,7 +546,7 @@ def run_multi(paths: list, last_week: bool = False, log_fn=None) -> dict:
         _update_weekly_snapshot(snapshot, total_rows)
         _l(f"Snapshot semanal atualizado: {total_rows} linhas totais")
 
-    return {table: n}
+    return {table: n_total}
 
 
 def _ensure_columns(conn):
