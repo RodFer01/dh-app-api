@@ -269,6 +269,57 @@ def get_contacts(account_bp: str, _user=Depends(verify_token)):
     }
 
 
+@router.get("/contacts/by-domain/{domain}")
+def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
+    """Return best-match account + team info for an email domain (e.g. 'vale.com.br').
+
+    Finds outreach contacts whose email ends with @{domain}, joins to pipeline,
+    and returns the account with the most open pipeline as the primary match.
+    """
+    like = f"%@{domain}"
+    rows = query(f"""
+        SELECT
+            oc.account_bpid,
+            MAX(p.account_name)                AS account_name,
+            MAX(p.opp_owner_name)              AS ae_name,
+            MAX(p.opp_owner_email)             AS ae_email,
+            MAX(p.flsm)                        AS flsm,
+            MAX(p.sde_current_territory_owner) AS sde,
+            COUNT(DISTINCT p.opportunity_id)   AS open_opps
+        FROM outreach_contacts oc
+        JOIN (
+            SELECT account_bp, account_name, opp_owner_name, opp_owner_email,
+                   flsm, sde_current_territory_owner, opportunity_id, drm_category
+            FROM pipeline
+            WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND account_bp IS NOT NULL
+        ) p ON p.account_bp = oc.account_bpid
+        WHERE LOWER(oc.email) LIKE LOWER({_PH})
+          AND p.drm_category NOT IN ('Disc/Lost', 'Booked/Won', 'Excluded from Pipeline')
+        GROUP BY oc.account_bpid
+        ORDER BY COUNT(DISTINCT p.opportunity_id) DESC
+        LIMIT 5
+    """, [like])
+
+    if not rows:
+        return {"domain": domain, "match": None, "candidates": []}
+
+    best = rows[0]
+    return {
+        "domain":     domain,
+        "match": {
+            "account_bpid":  best["account_bpid"],
+            "account_name":  best["account_name"],
+            "ae_name":       best["ae_name"],
+            "ae_email":      best["ae_email"],
+            "flsm":          best["flsm"],
+            "sde":           best["sde"],
+            "open_opps":     best["open_opps"],
+        },
+        "candidates": rows,
+    }
+
+
 @router.get("/contacts/search/{account_name}")
 def search_contacts_by_name(account_name: str, _user=Depends(verify_token)):
     """Search contacts by account name (partial, case-insensitive) — for testing/lookup."""
