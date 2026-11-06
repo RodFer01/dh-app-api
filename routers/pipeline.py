@@ -43,7 +43,7 @@ def pipeline_by_account(account_bp: str, _user=Depends(verify_token)):
     """
     rows = query(f"""
         SELECT
-            opportunity_id, opp_phase, opp_owner_name, opp_owner_email,
+            opportunity_id, opp_phase, opp_owner_name,
             flsm, sde_current_territory_owner, solution_area_l1,
             sub_solution_area_l2, acv_usd, closing_qtr, drm_category,
             region_lvl2, region_lvl3, region_lvl4
@@ -57,7 +57,7 @@ def pipeline_by_account(account_bp: str, _user=Depends(verify_token)):
     open_opps  = [r for r in rows if (r.get("drm_category") or "").lower() not in
                   ("disc/lost", "booked/won", "excluded from pipeline")]
     ae_names   = list({r["opp_owner_name"] for r in open_opps if r.get("opp_owner_name")})
-    ae_emails  = list({r["opp_owner_email"] for r in open_opps if r.get("opp_owner_email")})
+    ae_emails  = []
     flsms      = list({r["flsm"] for r in open_opps if r.get("flsm")})
     sdes       = list({r["sde_current_territory_owner"] for r in open_opps
                        if r.get("sde_current_territory_owner")})

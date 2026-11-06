@@ -283,13 +283,12 @@ def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
             oc.account_bpid,
             MAX(p.account_name)                AS account_name,
             MAX(p.opp_owner_name)              AS ae_name,
-            MAX(p.opp_owner_email)             AS ae_email,
             MAX(p.flsm)                        AS flsm,
             MAX(p.sde_current_territory_owner) AS sde,
             COUNT(DISTINCT p.opportunity_id)   AS pipeline_opps
         FROM outreach_contacts oc
         JOIN (
-            SELECT account_bp, account_name, opp_owner_name, opp_owner_email,
+            SELECT account_bp, account_name, opp_owner_name,
                    flsm, sde_current_territory_owner, opportunity_id
             FROM pipeline
             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
@@ -311,7 +310,6 @@ def search_contacts_by_email_domain(domain: str, _user=Depends(verify_token)):
             "account_bpid":  best["account_bpid"],
             "account_name":  best["account_name"],
             "ae_name":       best["ae_name"],
-            "ae_email":      best["ae_email"],
             "flsm":          best["flsm"],
             "sde":           best["sde"],
             "pipeline_opps": best["pipeline_opps"],
