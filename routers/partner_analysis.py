@@ -208,6 +208,7 @@ def partner_demo_activity_l3(
     local_owners:     List[str]     = Query(default=[]),
     acc_sub_segments: List[str]     = Query(default=[]),
     engagement_types: List[str]     = Query(default=[]),
+    opp_main_sol_l2s: List[str]     = Query(default=[]),
     _user=Depends(verify_token),
 ):
     mel_clauses, mel_params = [], []
@@ -215,6 +216,10 @@ def partner_demo_activity_l3(
         mel_clauses.append("m.activ_start_date_utc >= %s"); mel_params.append(date_from)
     if date_to:
         mel_clauses.append("m.activ_start_date_utc < ADD_DAYS(CAST(%s AS DATE), 1)"); mel_params.append(date_to)
+    if opp_main_sol_l2s:
+        ph = ",".join(["%s"] * len(opp_main_sol_l2s))
+        mel_clauses.append(f"m.opp_main_solution_l2 IN ({ph})")
+        mel_params.extend(opp_main_sol_l2s)
 
     pip_where, pip_params = _build_where(
         closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
@@ -270,6 +275,7 @@ def partner_demo_activity_l4(
     local_owners:     List[str]     = Query(default=[]),
     acc_sub_segments: List[str]     = Query(default=[]),
     engagement_types: List[str]     = Query(default=[]),
+    opp_main_sol_l2s: List[str]     = Query(default=[]),
     _user=Depends(verify_token),
 ):
     mel_clauses, mel_params = [], []
@@ -277,6 +283,10 @@ def partner_demo_activity_l4(
         mel_clauses.append("m.activ_start_date_utc >= %s"); mel_params.append(date_from)
     if date_to:
         mel_clauses.append("m.activ_start_date_utc < ADD_DAYS(CAST(%s AS DATE), 1)"); mel_params.append(date_to)
+    if opp_main_sol_l2s:
+        ph = ",".join(["%s"] * len(opp_main_sol_l2s))
+        mel_clauses.append(f"m.opp_main_solution_l2 IN ({ph})")
+        mel_params.extend(opp_main_sol_l2s)
 
     pip_where, pip_params = _build_where(
         closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
