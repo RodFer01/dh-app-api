@@ -135,6 +135,8 @@ CREATE COLUMN TABLE melody (
     activ_end_date_utc      TIMESTAMP,
     activ_notes             NCLOB,
     opp_main_solution_l2    NVARCHAR(200),
+    opp_main_solution_l3    NVARCHAR(200),
+    opp_main_solution_l4    NVARCHAR(200),
     activity_count          INTEGER,
     activity_team_count     INTEGER,
     PRIMARY KEY (activ_id, activ_team_empl_id)
@@ -501,6 +503,7 @@ def run_migration():
                 "activ_solution_l2","activ_solution_l3","activ_team_member_role",
                 "opp_id","activ_team_empl_id","activ_team_empl_name",
                 "activ_start_date_utc","activ_end_date_utc","activ_notes",
+                "opp_main_solution_l2","opp_main_solution_l3","opp_main_solution_l4",
                 "activity_count","activity_team_count"]
     migrate_table("melody", "melody", mel_cols)
 

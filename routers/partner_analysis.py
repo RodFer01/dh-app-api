@@ -187,6 +187,130 @@ def partner_demo_activity(
     return query(sql, all_params or None)
 
 
+# ── /demo-activity-l3 ─────────────────────────────────────────────────────────
+@router.get("/demo-activity-l3")
+def partner_demo_activity_l3(
+    date_from:        Optional[str] = None,
+    date_to:          Optional[str] = None,
+    channel_partners: List[str]     = Query(default=[]),
+    sol_l1s:          List[str]     = Query(default=[]),
+    sol_l2s:          List[str]     = Query(default=[]),
+    closing_qtrs:     List[str]     = Query(default=[]),
+    regions:          List[str]     = Query(default=[]),
+    region_lvl4s:     List[str]     = Query(default=[]),
+    drms:             List[str]     = Query(default=[]),
+    opp_phases:       List[str]     = Query(default=[]),
+    qual_decisions:   List[str]     = Query(default=[]),
+    iss_groups:       List[str]     = Query(default=[]),
+    iacs:             List[str]     = Query(default=[]),
+    flsms:            List[str]     = Query(default=[]),
+    opp_owners:       List[str]     = Query(default=[]),
+    local_owners:     List[str]     = Query(default=[]),
+    acc_sub_segments: List[str]     = Query(default=[]),
+    engagement_types: List[str]     = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    mel_clauses, mel_params = [], []
+    if date_from:
+        mel_clauses.append("m.activ_start_date_utc >= %s"); mel_params.append(date_from)
+    if date_to:
+        mel_clauses.append("m.activ_start_date_utc < ADD_DAYS(CAST(%s AS DATE), 1)"); mel_params.append(date_to)
+
+    pip_where, pip_params = _build_where(
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s, drms=drms, opp_phases=opp_phases,
+        qual_decisions=qual_decisions, iss_groups=iss_groups, iacs=iacs,
+        flsms=flsms, opp_owners=opp_owners, local_owners=local_owners,
+        channel_partners=channel_partners, acc_sub_segments=acc_sub_segments,
+        engagement_types=engagement_types,
+    )
+    pip_where = pip_where + " AND channel_partner IS NOT NULL AND channel_partner <> ''"
+
+    mel_where = ("WHERE " + " AND ".join(mel_clauses)) if mel_clauses else ""
+    all_params = pip_params + mel_params
+
+    sql = f"""
+        SELECT
+            p.channel_partner                                       AS partner,
+            COALESCE(m.opp_main_solution_l3, 'Not Specified')      AS opp_main_sol_l3,
+            COUNT(m.activ_id)                                       AS n_activities,
+            COUNT(DISTINCT m.opp_id)                               AS n_distinct_opps,
+            COUNT(DISTINCT m.activ_team_empl_id)                   AS n_distinct_sas
+        FROM melody m
+        JOIN (
+            SELECT DISTINCT opportunity_id, channel_partner
+            FROM pipeline
+            {pip_where}
+        ) p ON p.opportunity_id = m.opp_id
+        {mel_where}
+        GROUP BY p.channel_partner, COALESCE(m.opp_main_solution_l3, 'Not Specified')
+        ORDER BY n_activities DESC
+    """
+    return query(sql, all_params or None)
+
+
+# ── /demo-activity-l4 ─────────────────────────────────────────────────────────
+@router.get("/demo-activity-l4")
+def partner_demo_activity_l4(
+    date_from:        Optional[str] = None,
+    date_to:          Optional[str] = None,
+    channel_partners: List[str]     = Query(default=[]),
+    sol_l1s:          List[str]     = Query(default=[]),
+    sol_l2s:          List[str]     = Query(default=[]),
+    closing_qtrs:     List[str]     = Query(default=[]),
+    regions:          List[str]     = Query(default=[]),
+    region_lvl4s:     List[str]     = Query(default=[]),
+    drms:             List[str]     = Query(default=[]),
+    opp_phases:       List[str]     = Query(default=[]),
+    qual_decisions:   List[str]     = Query(default=[]),
+    iss_groups:       List[str]     = Query(default=[]),
+    iacs:             List[str]     = Query(default=[]),
+    flsms:            List[str]     = Query(default=[]),
+    opp_owners:       List[str]     = Query(default=[]),
+    local_owners:     List[str]     = Query(default=[]),
+    acc_sub_segments: List[str]     = Query(default=[]),
+    engagement_types: List[str]     = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    mel_clauses, mel_params = [], []
+    if date_from:
+        mel_clauses.append("m.activ_start_date_utc >= %s"); mel_params.append(date_from)
+    if date_to:
+        mel_clauses.append("m.activ_start_date_utc < ADD_DAYS(CAST(%s AS DATE), 1)"); mel_params.append(date_to)
+
+    pip_where, pip_params = _build_where(
+        closing_qtrs=closing_qtrs, regions=regions, region_lvl4s=region_lvl4s,
+        sol_l1s=sol_l1s, sol_l2s=sol_l2s, drms=drms, opp_phases=opp_phases,
+        qual_decisions=qual_decisions, iss_groups=iss_groups, iacs=iacs,
+        flsms=flsms, opp_owners=opp_owners, local_owners=local_owners,
+        channel_partners=channel_partners, acc_sub_segments=acc_sub_segments,
+        engagement_types=engagement_types,
+    )
+    pip_where = pip_where + " AND channel_partner IS NOT NULL AND channel_partner <> ''"
+
+    mel_where = ("WHERE " + " AND ".join(mel_clauses)) if mel_clauses else ""
+    all_params = pip_params + mel_params
+
+    sql = f"""
+        SELECT
+            p.channel_partner                                       AS partner,
+            COALESCE(m.opp_main_solution_l4, 'Not Specified')      AS opp_main_sol_l4,
+            COUNT(m.activ_id)                                       AS n_activities,
+            COUNT(DISTINCT m.opp_id)                               AS n_distinct_opps,
+            COUNT(DISTINCT m.activ_team_empl_id)                   AS n_distinct_sas
+        FROM melody m
+        JOIN (
+            SELECT DISTINCT opportunity_id, channel_partner
+            FROM pipeline
+            {pip_where}
+        ) p ON p.opportunity_id = m.opp_id
+        {mel_where}
+        GROUP BY p.channel_partner, COALESCE(m.opp_main_solution_l4, 'Not Specified')
+        ORDER BY n_activities DESC
+    """
+    return query(sql, all_params or None)
+
+
 # ── /demo-by-partner ─────────────────────────────────────────────────────────
 @router.get("/demo-by-partner")
 def demo_by_partner(

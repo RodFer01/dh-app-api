@@ -21,6 +21,8 @@ def get_activities(
     drm: Optional[str] = None,
     closing_qtr: Optional[str] = None,
     opp_main_sol_l2: Optional[str] = None,
+    opp_main_sol_l3: Optional[str] = None,
+    opp_main_sol_l4: Optional[str] = None,
     limit: int = Query(default=5000, le=20000),
     _user=Depends(verify_token),
 ):
@@ -47,6 +49,10 @@ def get_activities(
         params.append(sub_team)
     if opp_main_sol_l2:
         clauses.append("m.opp_main_solution_l2 = %s"); params.append(opp_main_sol_l2)
+    if opp_main_sol_l3:
+        clauses.append("m.opp_main_solution_l3 = %s"); params.append(opp_main_sol_l3)
+    if opp_main_sol_l4:
+        clauses.append("m.opp_main_solution_l4 = %s"); params.append(opp_main_sol_l4)
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
@@ -65,6 +71,8 @@ def get_activities(
             m.activ_end_date_utc   AS end_date,
             m.activ_notes          AS notes,
             m.opp_main_solution_l2 AS opp_main_sol_l2,
+            m.opp_main_solution_l3 AS opp_main_sol_l3,
+            m.opp_main_solution_l4 AS opp_main_sol_l4,
             t.area                 AS team_area,
             t.sub_team,
             p.region_lvl3          AS region,
@@ -136,6 +144,8 @@ def melody_filter_options(_user=Depends(verify_token)):
     team_areas     = _distinct("SELECT DISTINCT area FROM targets WHERE area IS NOT NULL ORDER BY area")
     sub_teams      = _distinct("SELECT DISTINCT sub_team FROM targets WHERE sub_team IS NOT NULL ORDER BY sub_team")
     opp_main_sol_l2s = _distinct("SELECT DISTINCT opp_main_solution_l2 FROM melody WHERE opp_main_solution_l2 IS NOT NULL ORDER BY opp_main_solution_l2")
+    opp_main_sol_l3s = _distinct("SELECT DISTINCT opp_main_solution_l3 FROM melody WHERE opp_main_solution_l3 IS NOT NULL ORDER BY opp_main_solution_l3")
+    opp_main_sol_l4s = _distinct("SELECT DISTINCT opp_main_solution_l4 FROM melody WHERE opp_main_solution_l4 IS NOT NULL ORDER BY opp_main_solution_l4")
 
     def clean(arr):
         skip = {'Activ Status', 'Activ Team Empl Name *', 'Activ Type', 'Sub Team'}
@@ -148,6 +158,8 @@ def melody_filter_options(_user=Depends(verify_token)):
         "team_areas":        clean(team_areas),
         "sub_teams":         clean(sub_teams),
         "opp_main_sol_l2s":  clean(opp_main_sol_l2s),
+        "opp_main_sol_l3s":  clean(opp_main_sol_l3s),
+        "opp_main_sol_l4s":  clean(opp_main_sol_l4s),
     }
 
 

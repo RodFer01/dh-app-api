@@ -44,6 +44,8 @@ async def run_migrations():
 
         _migrate_table("MELODY", [
             ("opp_main_solution_l2", 'ALTER TABLE "MELODY" ADD ("OPP_MAIN_SOLUTION_L2" NVARCHAR(200))'),
+            ("opp_main_solution_l3", 'ALTER TABLE "MELODY" ADD ("OPP_MAIN_SOLUTION_L3" NVARCHAR(200))'),
+            ("opp_main_solution_l4", 'ALTER TABLE "MELODY" ADD ("OPP_MAIN_SOLUTION_L4" NVARCHAR(200))'),
         ])
         _migrate_table("PIPELINE", [
             ("phase_since_days", 'ALTER TABLE "PIPELINE" ADD ("PHASE_SINCE_DAYS" INTEGER)'),
