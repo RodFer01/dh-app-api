@@ -20,6 +20,7 @@ def get_activities(
     employee_name: Optional[str] = None,
     drm: Optional[str] = None,
     closing_qtr: Optional[str] = None,
+    opp_main_sol_l2: Optional[str] = None,
     limit: int = Query(default=5000, le=20000),
     _user=Depends(verify_token),
 ):
@@ -44,6 +45,8 @@ def get_activities(
     if sub_team:
         clauses.append("EXISTS (SELECT 1 FROM targets t2 WHERE t2.inumber = m.activ_team_empl_id AND t2.sub_team = %s)")
         params.append(sub_team)
+    if opp_main_sol_l2:
+        clauses.append("m.opp_main_solution_l2 = %s"); params.append(opp_main_sol_l2)
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
@@ -61,6 +64,7 @@ def get_activities(
             m.activ_start_date_utc AS start_date,
             m.activ_end_date_utc   AS end_date,
             m.activ_notes          AS notes,
+            m.opp_main_solution_l2 AS opp_main_sol_l2,
             t.area                 AS team_area,
             t.sub_team,
             p.region_lvl3          AS region,
@@ -131,17 +135,19 @@ def melody_filter_options(_user=Depends(verify_token)):
     employees      = _distinct("SELECT DISTINCT activ_team_empl_name FROM melody WHERE activ_team_empl_name IS NOT NULL ORDER BY activ_team_empl_name")
     team_areas     = _distinct("SELECT DISTINCT area FROM targets WHERE area IS NOT NULL ORDER BY area")
     sub_teams      = _distinct("SELECT DISTINCT sub_team FROM targets WHERE sub_team IS NOT NULL ORDER BY sub_team")
+    opp_main_sol_l2s = _distinct("SELECT DISTINCT opp_main_solution_l2 FROM melody WHERE opp_main_solution_l2 IS NOT NULL ORDER BY opp_main_solution_l2")
 
     def clean(arr):
         skip = {'Activ Status', 'Activ Team Empl Name *', 'Activ Type', 'Sub Team'}
         return [v for v in arr if v not in skip]
 
     return {
-        "activity_types": clean(activity_types),
-        "statuses":        clean(statuses),
-        "employees":       clean(employees),
-        "team_areas":      clean(team_areas),
-        "sub_teams":       clean(sub_teams),
+        "activity_types":   clean(activity_types),
+        "statuses":          clean(statuses),
+        "employees":         clean(employees),
+        "team_areas":        clean(team_areas),
+        "sub_teams":         clean(sub_teams),
+        "opp_main_sol_l2s":  clean(opp_main_sol_l2s),
     }
 
 

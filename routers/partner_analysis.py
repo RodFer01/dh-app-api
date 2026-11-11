@@ -133,6 +133,7 @@ def partner_demo_activity(
     acc_sub_segments: List[str]     = Query(default=[]),
     engagement_types: List[str]     = Query(default=[]),
     engagement_type:  Optional[str] = None,
+    opp_main_sol_l2:  Optional[str] = None,
     _user=Depends(verify_token),
 ):
     """
@@ -146,6 +147,8 @@ def partner_demo_activity(
         mel_clauses.append("m.activ_start_date_utc >= %s"); mel_params.append(date_from)
     if date_to:
         mel_clauses.append("m.activ_start_date_utc < ADD_DAYS(CAST(%s AS DATE), 1)"); mel_params.append(date_to)
+    if opp_main_sol_l2:
+        mel_clauses.append("m.opp_main_solution_l2 = %s"); mel_params.append(opp_main_sol_l2)
 
     # Build pipeline subquery WHERE using shared _build_where (includes snapshot filter)
     pip_where, pip_params = _build_where(

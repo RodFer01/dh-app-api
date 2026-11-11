@@ -134,6 +134,7 @@ CREATE COLUMN TABLE melody (
     activ_start_date_utc    TIMESTAMP,
     activ_end_date_utc      TIMESTAMP,
     activ_notes             NCLOB,
+    opp_main_solution_l2    NVARCHAR(200),
     activity_count          INTEGER,
     activity_team_count     INTEGER,
     PRIMARY KEY (activ_id, activ_team_empl_id)

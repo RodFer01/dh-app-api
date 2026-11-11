@@ -53,8 +53,9 @@ def _parse_melody_csv(path) -> list:
                 "activ_start_date_utc":   _parse_ts(parts[10]),
                 "activ_end_date_utc":     _parse_ts(parts[11]) if len(parts) > 11 else None,
                 "activ_notes":            clean_str(parts[12]) if len(parts) > 12 else None,
-                "activity_count":         clean_int(parts[13]) if len(parts) > 13 else None,
-                "activity_team_count":    clean_int(parts[14]) if len(parts) > 14 else None,
+                "opp_main_solution_l2":   clean_str(parts[13]) if len(parts) > 13 else None,
+                "activity_count":         clean_int(parts[14]) if len(parts) > 14 else None,
+                "activity_team_count":    clean_int(parts[15]) if len(parts) > 15 else None,
             })
     return rows
 

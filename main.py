@@ -42,6 +42,9 @@ async def run_migrations():
                 else:
                     print(f"[migration] OK: {col.upper()} already in {table_upper}", flush=True)
 
+        _migrate_table("MELODY", [
+            ("opp_main_solution_l2", 'ALTER TABLE "MELODY" ADD ("OPP_MAIN_SOLUTION_L2" NVARCHAR(200))'),
+        ])
         _migrate_table("PIPELINE", [
             ("phase_since_days", 'ALTER TABLE "PIPELINE" ADD ("PHASE_SINCE_DAYS" INTEGER)'),
             ("region_lvl4",      'ALTER TABLE "PIPELINE" ADD ("REGION_LVL4" NVARCHAR(100))'),
