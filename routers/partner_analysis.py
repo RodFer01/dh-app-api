@@ -169,7 +169,7 @@ def partner_demo_activity(
     sql = f"""
         SELECT
             p.channel_partner                                       AS partner,
-            COALESCE(t.sub_team, 'Unknown')                        AS sa_lob,
+            COALESCE(m.opp_main_solution_l2, 'Not Specified')      AS opp_main_sol_l2,
             COUNT(m.activ_id)                                       AS n_activities,
             COUNT(DISTINCT m.opp_id)                               AS n_distinct_opps,
             COUNT(DISTINCT m.activ_team_empl_id)                   AS n_distinct_sas
@@ -181,7 +181,7 @@ def partner_demo_activity(
         ) p ON p.opportunity_id = m.opp_id
         LEFT JOIN targets t ON t.inumber = m.activ_team_empl_id
         {mel_where}
-        GROUP BY p.channel_partner, COALESCE(t.sub_team, 'Unknown')
+        GROUP BY p.channel_partner, COALESCE(m.opp_main_solution_l2, 'Not Specified')
         ORDER BY n_activities DESC
     """
     return query(sql, all_params or None)
@@ -211,16 +211,16 @@ def demo_by_partner(
 
     sql = f"""
         SELECT TOP 500
-            m.activ_id                     AS activity_id,
-            m.activ_type                   AS activity_type,
-            m.activ_status                 AS status,
-            m.acct_name                    AS account_name,
-            p.channel_partner              AS partner,
-            m.activ_team_empl_name         AS sa_name,
-            COALESCE(t.sub_team, 'Unknown') AS sa_lob,
-            m.activ_solution_l2            AS solution_l2,
-            m.activ_solution_l3            AS solution_l3,
-            m.activ_start_date_utc         AS activity_date,
+            m.activ_id                                          AS activity_id,
+            m.activ_type                                        AS activity_type,
+            m.activ_status                                      AS status,
+            m.acct_name                                         AS account_name,
+            p.channel_partner                                   AS partner,
+            m.activ_team_empl_name                             AS sa_name,
+            COALESCE(m.opp_main_solution_l2, 'Not Specified')  AS opp_main_sol_l2,
+            m.activ_solution_l2                                AS solution_l2,
+            m.activ_solution_l3                                AS solution_l3,
+            m.activ_start_date_utc                             AS activity_date,
             p.solution_area_l1,
             p.drm_category,
             p.closing_qtr,
@@ -232,7 +232,6 @@ def demo_by_partner(
                    ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY snapshot_week DESC) AS _rn
             FROM pipeline
         ) p ON p.opportunity_id = m.opp_id AND p._rn = 1
-        LEFT JOIN targets t ON t.inumber = m.activ_team_empl_id
         {where}
         ORDER BY m.activ_start_date_utc DESC
     """
