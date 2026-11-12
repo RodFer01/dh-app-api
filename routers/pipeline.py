@@ -1458,8 +1458,9 @@ def get_shadow_opps(
                        solution_area_l1, sub_solution_area_l2,
                        drm_category, opp_phase, closing_qtr,
                        acv_total_opp, vat_dh,
-                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY snapshot_week DESC) AS rn
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
                 FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
             ) t
             WHERE t.rn = 1
         ),
