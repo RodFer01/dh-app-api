@@ -281,6 +281,7 @@ def get_evolution_phase(
         iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
+    exc_params = params + list(_EXCLUDED_DRM_CATS)
     rows = query(
         f"""
         SELECT
@@ -290,10 +291,11 @@ def get_evolution_phase(
             SUM(acv_usd) AS total_acv
         FROM past_pipeline
         {where}
+        {"AND" if where else "WHERE"} drm_category NOT IN (%s, %s, %s)
         GROUP BY snapshot_week, opp_phase
         ORDER BY snapshot_week ASC, opp_phase ASC
         """,
-        params or None,
+        exc_params,
     )
     return [
         {
