@@ -1417,7 +1417,7 @@ def get_missed_vat(
 
 
 @router.get("/bookings/shadow-debug")
-def get_shadow_debug(_user=Depends(verify_token)):
+def get_shadow_debug():
     """Diagnostic: counts at each step of the shadow-opps pipeline."""
     rows = query("""
         SELECT
