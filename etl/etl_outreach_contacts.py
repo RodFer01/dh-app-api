@@ -10,7 +10,7 @@ log = get_logger("etl.outreach_contacts")
 DATABRICKS_CFG = {
     "server_hostname": os.getenv("DATABRICKS_HOST",  "adb-4313574291768790.10.azuredatabricks.net"),
     "http_path":       os.getenv("DATABRICKS_PATH",  "/sql/1.0/warehouses/3679dfdc0cbd20ed"),
-    "access_token":    os.getenv("DATABRICKS_TOKEN", "dapia4e992f97cd9165c7a944cbe688ef4fd-2"),
+    "access_token":    os.getenv("DATABRICKS_TOKEN"),
     "_tls_no_verify":  True,
 }
 
