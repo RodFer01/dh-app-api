@@ -1419,6 +1419,42 @@ def get_missed_vat(
     return rows
 
 
+@router.get("/bookings/shadow-debug")
+def get_shadow_debug(_user=Depends(verify_token)):
+    """Diagnostic: counts at each step of the shadow-opps pipeline."""
+    rows = query("""
+        SELECT
+            (SELECT COUNT(DISTINCT opportunity_id) FROM pipeline
+             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+               AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+               AND (vat_dh IS NULL OR vat_dh = '')
+            ) AS closed_no_dsa,
+            (SELECT COUNT(*) FROM pipeline
+             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+               AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+               AND (vat_dh IS NULL OR vat_dh = '')
+               AND sde_primary_engagement_name IS NOT NULL
+               AND sde_primary_engagement_name != ''
+            ) AS closed_lines_with_product,
+            (SELECT COUNT(*) FROM pipeline
+             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+               AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
+               AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
+               AND sde_primary_engagement_name IS NOT NULL
+               AND sde_primary_engagement_name != ''
+            ) AS shadow_lines_with_product,
+            (SELECT COUNT(*) FROM pipeline
+             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+               AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
+               AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
+               AND sub_solution_area_l2 IS NOT NULL
+               AND sub_solution_area_l2 != ''
+            ) AS shadow_lines_with_l2
+        FROM dummy
+    """, None)
+    return rows[0] if rows else {}
+
+
 @router.get("/bookings/shadow-opps")
 def get_shadow_opps(
     closing_qtrs: List[str] = Query(default=[]),
