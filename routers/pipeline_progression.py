@@ -222,6 +222,7 @@ def get_evolution(
         iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
+    exc_params = params + list(_EXCLUDED_DRM_CATS)
     rows = query(
         f"""
         SELECT
@@ -235,7 +236,7 @@ def get_evolution(
         GROUP BY snapshot_week, drm_category
         ORDER BY snapshot_week ASC, drm_category ASC
         """,
-        (params or []) + list(_EXCLUDED_DRM_CATS) or None,
+        exc_params,
     )
     return [
         {
