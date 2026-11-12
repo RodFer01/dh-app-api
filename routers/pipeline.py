@@ -1418,8 +1418,9 @@ def get_missed_vat(
 
 @router.get("/bookings/shadow-debug")
 def get_shadow_debug():
-    """Diagnostic: counts at each step of the shadow-opps pipeline."""
-    rows = query("""
+    """Diagnostic: counts + full CTE test for shadow-opps pipeline."""
+    # Step 1: basic counts
+    counts = query("""
         SELECT
             (SELECT COUNT(DISTINCT opportunity_id) FROM pipeline
              WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
@@ -1466,7 +1467,90 @@ def get_shadow_debug():
             ) t) AS product_matches
         FROM dummy
     """, None)
-    return rows[0] if rows else {}
+
+    # Step 2: full CTE query count (same SQL as shadow-opps)
+    try:
+        cte_rows = query("""
+            WITH closed_base AS (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, sub_solution_area_l2,
+                       drm_category, opp_phase,
+                       closing_date, closing_qtr, region_lvl3,
+                       acv_total_opp, vat_full, opp_owner_name, flsm
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+                  AND (vat_dh IS NULL OR vat_dh = '')
+            ),
+            closed_lines AS (
+                SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
+                FROM closed_base
+                WHERE sub_solution_area_l2 IS NOT NULL AND sub_solution_area_l2 != ''
+            ),
+            closed_headers AS (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, closing_date, closing_qtr, region_lvl3,
+                       acv_total_opp, vat_full, opp_owner_name, flsm, drm_category
+                FROM (
+                    SELECT opportunity_id, account_name, opp_description,
+                           solution_area_l1, closing_date, closing_qtr, region_lvl3,
+                           acv_total_opp, vat_full, opp_owner_name, flsm, drm_category,
+                           ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+                    FROM closed_base
+                ) t WHERE rn = 1
+            ),
+            dsa_base AS (
+                SELECT opportunity_id, account_name, opp_description,
+                       sub_solution_area_l2,
+                       drm_category, opp_phase,
+                       closing_qtr, acv_total_opp, vat_dh
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND vat_dh IS NOT NULL AND vat_dh != ''
+            ),
+            dsa_lines AS (
+                SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
+                FROM dsa_base
+                WHERE sub_solution_area_l2 IS NOT NULL AND sub_solution_area_l2 != ''
+            ),
+            dsa_headers AS (
+                SELECT opportunity_id, opp_description, drm_category, opp_phase,
+                       closing_qtr, acv_total_opp, vat_dh
+                FROM (
+                    SELECT opportunity_id, opp_description, drm_category, opp_phase,
+                           closing_qtr, acv_total_opp, vat_dh,
+                           ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+                    FROM dsa_base
+                ) t WHERE rn = 1
+            ),
+            product_matches AS (
+                SELECT cl.opportunity_id      AS closed_opp_id,
+                       dl.opportunity_id      AS dsa_opp_id,
+                       cl.sub_solution_area_l2 AS matched_product
+                FROM closed_lines cl
+                JOIN dsa_lines dl
+                  ON cl.account_name         = dl.account_name
+                 AND cl.sub_solution_area_l2 = dl.sub_solution_area_l2
+                 AND cl.opportunity_id      != dl.opportunity_id
+            ),
+            pair_products AS (
+                SELECT closed_opp_id, dsa_opp_id,
+                       STRING_AGG(matched_product, ' | ') AS matched_products
+                FROM product_matches
+                GROUP BY closed_opp_id, dsa_opp_id
+            )
+            SELECT COUNT(*) AS pair_count FROM pair_products
+        """, None)
+        cte_count = cte_rows[0]["pair_count"] if cte_rows else 0
+        cte_error = None
+    except Exception as e:
+        cte_count = -1
+        cte_error = str(e)
+
+    result = dict(counts[0]) if counts else {}
+    result["cte_pair_count"] = cte_count
+    result["cte_error"] = cte_error
+    return result
 
 
 @router.get("/bookings/shadow-opps")
