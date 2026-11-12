@@ -231,10 +231,11 @@ def get_evolution(
             SUM(acv_usd) AS total_acv
         FROM past_pipeline
         {where}
+        {"AND" if where else "WHERE"} drm_category NOT IN (%s, %s, %s)
         GROUP BY snapshot_week, drm_category
         ORDER BY snapshot_week ASC, drm_category ASC
         """,
-        params or None,
+        (params or []) + list(_EXCLUDED_DRM_CATS) or None,
     )
     return [
         {
