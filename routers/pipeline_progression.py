@@ -49,17 +49,39 @@ def _pp_build_where(
     sol_l1s: List[str] = [],
     drms: List[str] = [],
     opp_phases: List[str] = [],
+    region_lvl4s: List[str] = [],
+    sol_l2s: List[str] = [],
+    flsms: List[str] = [],
+    channel_partners: List[str] = [],
+    opp_owners: List[str] = [],
+    local_owners: List[str] = [],
+    qual_decisions: List[str] = [],
+    iss_groups: List[str] = [],
+    iacs: List[str] = [],
+    acc_sub_segments: List[str] = [],
+    engagement_types: List[str] = [],
 ) -> tuple:
     clauses, params = [], []
 
     if snapshot_week:
         clauses.append("snapshot_week = %s"); params.append(snapshot_week)
 
-    _multi_filter("closing_qtr",     closing_qtrs, clauses, params)
-    _multi_filter("region_lvl3",     regions,      clauses, params)
-    _multi_filter("solution_area_l1", sol_l1s,     clauses, params)
-    _multi_filter("drm_category",    drms,         clauses, params)
-    _multi_filter("opp_phase",       opp_phases,   clauses, params)
+    _multi_filter("closing_qtr",                closing_qtrs,     clauses, params)
+    _multi_filter("region_lvl3",                regions,          clauses, params)
+    _multi_filter("solution_area_l1",           sol_l1s,          clauses, params)
+    _multi_filter("drm_category",               drms,             clauses, params)
+    _multi_filter("opp_phase",                  opp_phases,       clauses, params)
+    _multi_filter("region_lvl4",                region_lvl4s,     clauses, params)
+    _multi_filter("sub_solution_area_l2",       sol_l2s,          clauses, params)
+    _multi_filter("flsm",                       flsms,            clauses, params)
+    _multi_filter("channel_partner",            channel_partners, clauses, params)
+    _multi_filter("opp_owner_name",             opp_owners,       clauses, params)
+    _multi_filter("local_acc_owner",            local_owners,     clauses, params)
+    _multi_filter("deal_qualification_decision",qual_decisions,   clauses, params)
+    _multi_filter("iss_group",                  iss_groups,       clauses, params)
+    _multi_filter("iac",                        iacs,             clauses, params)
+    _multi_filter("acc_sub_segment",            acc_sub_segments, clauses, params)
+    _multi_filter("engagement_type",            engagement_types, clauses, params)
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return where, params
@@ -79,58 +101,122 @@ def get_snapshots(token: str = Depends(verify_token)) -> List[Dict[str, Any]]:
 # ── /summary ──────────────────────────────────────────────────────────────────
 @router.get("/summary")
 def get_summary(
-    snapshot_week: Optional[str] = Query(None),
-    closing_qtrs:  List[str]     = Query(default=[]),
-    regions:       List[str]     = Query(default=[]),
-    sol_l1s:       List[str]     = Query(default=[]),
-    drms:          List[str]     = Query(default=[]),
+    snapshot_week:    Optional[str] = Query(None),
+    closing_qtrs:     List[str]     = Query(default=[]),
+    regions:          List[str]     = Query(default=[]),
+    sol_l1s:          List[str]     = Query(default=[]),
+    drms:             List[str]     = Query(default=[]),
+    opp_phases:       List[str]     = Query(default=[]),
+    region_lvl4s:     List[str]     = Query(default=[]),
+    sol_l2s:          List[str]     = Query(default=[]),
+    flsms:            List[str]     = Query(default=[]),
+    channel_partners: List[str]     = Query(default=[]),
+    opp_owners:       List[str]     = Query(default=[]),
+    local_owners:     List[str]     = Query(default=[]),
+    qual_decisions:   List[str]     = Query(default=[]),
+    iss_groups:       List[str]     = Query(default=[]),
+    iacs:             List[str]     = Query(default=[]),
+    acc_sub_segments: List[str]     = Query(default=[]),
+    engagement_types: List[str]     = Query(default=[]),
     token: str = Depends(verify_token),
 ) -> Dict[str, Any]:
     effective_week = snapshot_week or _latest_snapshot()
     if effective_week is None:
-        return {"snapshot_week": None, "total_opps": 0, "total_acv": 0.0, "stalled_opps": 0, "stalled_acv": 0.0}
+        return {"snapshot_week": None, "total_opps": 0, "total_acv": 0.0,
+                "stalled_opps": 0, "stalled_acv": 0.0,
+                "prev_snapshot_week": None, "prev_total_opps": 0, "prev_total_acv": 0.0,
+                "delta_opps": 0, "delta_acv": 0.0, "delta_acv_pct": 0.0}
 
-    where, params = _pp_build_where(
-        snapshot_week=effective_week,
+    filter_kwargs = dict(
         closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, drms=drms,
+        opp_phases=opp_phases, region_lvl4s=region_lvl4s, sol_l2s=sol_l2s,
+        flsms=flsms, channel_partners=channel_partners, opp_owners=opp_owners,
+        local_owners=local_owners, qual_decisions=qual_decisions, iss_groups=iss_groups,
+        iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
-    rows = query(
-        f"""
+    where, params = _pp_build_where(snapshot_week=effective_week, **filter_kwargs)
+
+    _SUMMARY_SQL = """
         SELECT
-            COUNT(*)                                           AS total_opps,
-            SUM(acv_usd)                                      AS total_acv,
-            SUM(CASE WHEN age_days > 21 THEN 1 ELSE 0 END)    AS stalled_opps,
+            COUNT(*)                                              AS total_opps,
+            SUM(acv_usd)                                         AS total_acv,
+            SUM(CASE WHEN age_days > 21 THEN 1 ELSE 0 END)       AS stalled_opps,
             SUM(CASE WHEN age_days > 21 THEN acv_usd ELSE 0 END) AS stalled_acv
         FROM past_pipeline
-        {where}
-        """,
-        params or None,
-    )
-
+        {}
+    """
+    rows = query(_SUMMARY_SQL.format(where), params or None)
     r = rows[0] if rows else {}
+
+    # WoW delta: find the snapshot immediately before effective_week
+    prev_rows = query(
+        "SELECT MAX(snapshot_week) AS prev_week FROM past_pipeline WHERE snapshot_week < %s",
+        [effective_week],
+    )
+    prev_week = None
+    if prev_rows and prev_rows[0].get("prev_week"):
+        prev_week = str(prev_rows[0]["prev_week"])[:10]
+
+    prev_total_opps = 0
+    prev_total_acv  = 0.0
+    if prev_week:
+        prev_where, prev_params = _pp_build_where(snapshot_week=prev_week, **filter_kwargs)
+        prev_r_rows = query(_SUMMARY_SQL.format(prev_where), prev_params or None)
+        if prev_r_rows:
+            prev_total_opps = int(prev_r_rows[0].get("total_opps") or 0)
+            prev_total_acv  = float(prev_r_rows[0].get("total_acv") or 0.0)
+
+    total_opps = int(r.get("total_opps") or 0)
+    total_acv  = float(r.get("total_acv") or 0.0)
+    delta_acv  = total_acv - prev_total_acv
+    delta_acv_pct = (delta_acv / prev_total_acv * 100) if prev_total_acv else 0.0
+
     return {
-        "snapshot_week": effective_week,
-        "total_opps":   int(r.get("total_opps") or 0),
-        "total_acv":    float(r.get("total_acv") or 0.0),
-        "stalled_opps": int(r.get("stalled_opps") or 0),
-        "stalled_acv":  float(r.get("stalled_acv") or 0.0),
+        "snapshot_week":      effective_week,
+        "total_opps":         total_opps,
+        "total_acv":          total_acv,
+        "stalled_opps":       int(r.get("stalled_opps") or 0),
+        "stalled_acv":        float(r.get("stalled_acv") or 0.0),
+        "prev_snapshot_week": prev_week,
+        "prev_total_opps":    prev_total_opps,
+        "prev_total_acv":     prev_total_acv,
+        "delta_opps":         total_opps - prev_total_opps,
+        "delta_acv":          round(delta_acv, 2),
+        "delta_acv_pct":      round(delta_acv_pct, 2),
     }
 
 
 # ── /evolution (DRM Category × week) ─────────────────────────────────────────
 @router.get("/evolution")
 def get_evolution(
-    closing_qtrs:  List[str] = Query(default=[]),
-    regions:       List[str] = Query(default=[]),
-    sol_l1s:       List[str] = Query(default=[]),
+    closing_qtrs:     List[str] = Query(default=[]),
+    regions:          List[str] = Query(default=[]),
+    sol_l1s:          List[str] = Query(default=[]),
+    drms:             List[str] = Query(default=[]),
+    opp_phases:       List[str] = Query(default=[]),
+    region_lvl4s:     List[str] = Query(default=[]),
+    sol_l2s:          List[str] = Query(default=[]),
+    flsms:            List[str] = Query(default=[]),
+    channel_partners: List[str] = Query(default=[]),
+    opp_owners:       List[str] = Query(default=[]),
+    local_owners:     List[str] = Query(default=[]),
+    qual_decisions:   List[str] = Query(default=[]),
+    iss_groups:       List[str] = Query(default=[]),
+    iacs:             List[str] = Query(default=[]),
+    acc_sub_segments: List[str] = Query(default=[]),
+    engagement_types: List[str] = Query(default=[]),
     token: str = Depends(verify_token),
 ) -> List[Dict[str, Any]]:
     if not _check_table():
         return []
 
     where, params = _pp_build_where(
-        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s,
+        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, drms=drms,
+        opp_phases=opp_phases, region_lvl4s=region_lvl4s, sol_l2s=sol_l2s,
+        flsms=flsms, channel_partners=channel_partners, opp_owners=opp_owners,
+        local_owners=local_owners, qual_decisions=qual_decisions, iss_groups=iss_groups,
+        iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
     rows = query(
@@ -161,10 +247,22 @@ def get_evolution(
 # ── /evolution-phase (Opp Phase × week) ───────────────────────────────────────
 @router.get("/evolution-phase")
 def get_evolution_phase(
-    closing_qtrs: List[str] = Query(default=[]),
-    regions:      List[str] = Query(default=[]),
-    sol_l1s:      List[str] = Query(default=[]),
-    drms:         List[str] = Query(default=[]),
+    closing_qtrs:     List[str] = Query(default=[]),
+    regions:          List[str] = Query(default=[]),
+    sol_l1s:          List[str] = Query(default=[]),
+    drms:             List[str] = Query(default=[]),
+    opp_phases:       List[str] = Query(default=[]),
+    region_lvl4s:     List[str] = Query(default=[]),
+    sol_l2s:          List[str] = Query(default=[]),
+    flsms:            List[str] = Query(default=[]),
+    channel_partners: List[str] = Query(default=[]),
+    opp_owners:       List[str] = Query(default=[]),
+    local_owners:     List[str] = Query(default=[]),
+    qual_decisions:   List[str] = Query(default=[]),
+    iss_groups:       List[str] = Query(default=[]),
+    iacs:             List[str] = Query(default=[]),
+    acc_sub_segments: List[str] = Query(default=[]),
+    engagement_types: List[str] = Query(default=[]),
     token: str = Depends(verify_token),
 ) -> List[Dict[str, Any]]:
     if not _check_table():
@@ -172,6 +270,10 @@ def get_evolution_phase(
 
     where, params = _pp_build_where(
         closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, drms=drms,
+        opp_phases=opp_phases, region_lvl4s=region_lvl4s, sol_l2s=sol_l2s,
+        flsms=flsms, channel_partners=channel_partners, opp_owners=opp_owners,
+        local_owners=local_owners, qual_decisions=qual_decisions, iss_groups=iss_groups,
+        iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
     rows = query(
@@ -257,10 +359,23 @@ def get_changes(
 # ── /stalled ──────────────────────────────────────────────────────────────────
 @router.get("/stalled")
 def get_stalled(
-    snapshot_week: Optional[str] = Query(None),
-    closing_qtrs:  List[str]     = Query(default=[]),
-    regions:       List[str]     = Query(default=[]),
-    sol_l1s:       List[str]     = Query(default=[]),
+    snapshot_week:    Optional[str] = Query(None),
+    closing_qtrs:     List[str]     = Query(default=[]),
+    regions:          List[str]     = Query(default=[]),
+    sol_l1s:          List[str]     = Query(default=[]),
+    drms:             List[str]     = Query(default=[]),
+    opp_phases:       List[str]     = Query(default=[]),
+    region_lvl4s:     List[str]     = Query(default=[]),
+    sol_l2s:          List[str]     = Query(default=[]),
+    flsms:            List[str]     = Query(default=[]),
+    channel_partners: List[str]     = Query(default=[]),
+    opp_owners:       List[str]     = Query(default=[]),
+    local_owners:     List[str]     = Query(default=[]),
+    qual_decisions:   List[str]     = Query(default=[]),
+    iss_groups:       List[str]     = Query(default=[]),
+    iacs:             List[str]     = Query(default=[]),
+    acc_sub_segments: List[str]     = Query(default=[]),
+    engagement_types: List[str]     = Query(default=[]),
     token: str = Depends(verify_token),
 ) -> List[Dict[str, Any]]:
     effective_week = snapshot_week or _latest_snapshot()
@@ -269,7 +384,11 @@ def get_stalled(
 
     where, params = _pp_build_where(
         snapshot_week=effective_week,
-        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s,
+        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, drms=drms,
+        opp_phases=opp_phases, region_lvl4s=region_lvl4s, sol_l2s=sol_l2s,
+        flsms=flsms, channel_partners=channel_partners, opp_owners=opp_owners,
+        local_owners=local_owners, qual_decisions=qual_decisions, iss_groups=iss_groups,
+        iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
     )
 
     rows = query(
