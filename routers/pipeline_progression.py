@@ -6,6 +6,9 @@ from auth import verify_token
 
 router = APIRouter(prefix="/api/pipeline-progression", tags=["pipeline-progression"])
 
+# DRM categories excluded from evolution charts (noise / non-actionable)
+_EXCLUDED_DRM_CATS = ('Exclude from Pipeline', 'Partner Forecasted', 'Partner Upside')
+
 # Cached flag — once True, never re-checks until restart
 _TABLE_EXISTS: Optional[bool] = None
 
