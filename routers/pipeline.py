@@ -1486,7 +1486,7 @@ def get_shadow_opps(
     sql = f"""
         WITH closed_base AS (
             SELECT opportunity_id, account_name, opp_description,
-                   solution_area_l1, sde_primary_engagement_name,
+                   solution_area_l1, sub_solution_area_l2,
                    drm_category, opp_phase,
                    closing_date, closing_qtr, region_lvl3,
                    acv_total_opp, vat_full, opp_owner_name, flsm
@@ -1497,10 +1497,10 @@ def get_shadow_opps(
               {closed_filter}
         ),
         closed_lines AS (
-            SELECT DISTINCT opportunity_id, account_name, sde_primary_engagement_name
+            SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
             FROM closed_base
-            WHERE sde_primary_engagement_name IS NOT NULL
-              AND sde_primary_engagement_name != ''
+            WHERE sub_solution_area_l2 IS NOT NULL
+              AND sub_solution_area_l2 != ''
         ),
         closed_headers AS (
             SELECT opportunity_id, account_name, opp_description,
@@ -1516,7 +1516,7 @@ def get_shadow_opps(
         ),
         shadow_base AS (
             SELECT opportunity_id, account_name, opp_description,
-                   sde_primary_engagement_name,
+                   sub_solution_area_l2,
                    drm_category, opp_phase,
                    closing_qtr, acv_total_opp, vat_dh
             FROM pipeline
@@ -1525,10 +1525,10 @@ def get_shadow_opps(
               AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
         ),
         shadow_lines AS (
-            SELECT DISTINCT opportunity_id, account_name, sde_primary_engagement_name
+            SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
             FROM shadow_base
-            WHERE sde_primary_engagement_name IS NOT NULL
-              AND sde_primary_engagement_name != ''
+            WHERE sub_solution_area_l2 IS NOT NULL
+              AND sub_solution_area_l2 != ''
         ),
         shadow_headers AS (
             SELECT opportunity_id, opp_description, drm_category, opp_phase,
@@ -1541,14 +1541,14 @@ def get_shadow_opps(
             ) t WHERE rn = 1
         ),
         product_matches AS (
-            SELECT cl.opportunity_id  AS closed_opp_id,
-                   sl.opportunity_id  AS shadow_opp_id,
-                   cl.sde_primary_engagement_name AS matched_product
+            SELECT cl.opportunity_id   AS closed_opp_id,
+                   sl.opportunity_id   AS shadow_opp_id,
+                   cl.sub_solution_area_l2 AS matched_product
             FROM closed_lines cl
             JOIN shadow_lines sl
-              ON cl.account_name              = sl.account_name
-             AND cl.sde_primary_engagement_name = sl.sde_primary_engagement_name
-             AND cl.opportunity_id            != sl.opportunity_id
+              ON cl.account_name          = sl.account_name
+             AND cl.sub_solution_area_l2  = sl.sub_solution_area_l2
+             AND cl.opportunity_id       != sl.opportunity_id
         ),
         pair_products AS (
             SELECT closed_opp_id, shadow_opp_id,
