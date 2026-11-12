@@ -486,14 +486,12 @@ def get_opp_lines(payload: OppLinesRequest, _user=Depends(verify_token)):
     rows = query(
         f"""
         SELECT opportunity_id, solution_area_l1, sub_solution_area_l2,
-               sde_primary_engagement_name,
                SUM(acv_usd) AS acv_usd
         FROM pipeline
         WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
           AND opportunity_id IN ({ph})
           AND acv_usd > 0
-        GROUP BY opportunity_id, solution_area_l1, sub_solution_area_l2,
-                 sde_primary_engagement_name
+        GROUP BY opportunity_id, solution_area_l1, sub_solution_area_l2
         ORDER BY opportunity_id, solution_area_l1, acv_usd DESC
         """,
         payload.opp_ids,
@@ -506,7 +504,6 @@ def get_opp_lines(payload: OppLinesRequest, _user=Depends(verify_token)):
         result[oid].append({
             "sol_l1": r["solution_area_l1"] or "",
             "sol_l2": r["sub_solution_area_l2"] or "",
-            "eng":    r["sde_primary_engagement_name"] or "",
             "acv":    float(r["acv_usd"] or 0),
         })
     return result
