@@ -1518,7 +1518,7 @@ def get_shadow_opps(
         JOIN shadow_opps s
           ON  s.account_name     = c.account_name
           AND s.shadow_opp_id   != c.opportunity_id
-          AND s.solution_area_l1 = c.closed_sol_l1
+          AND s.solution_area_l1 = c.solution_area_l1
         ORDER BY c.closing_date DESC NULLS LAST, c.account_name, c.opportunity_id
     """
     all_params = closed_params or None
