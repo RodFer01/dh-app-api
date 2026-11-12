@@ -1419,6 +1419,113 @@ def get_missed_vat(
     return rows
 
 
+@router.get("/bookings/shadow-opps")
+def get_shadow_opps(
+    closing_qtrs: List[str] = Query(default=[]),
+    regions:      List[str] = Query(default=[]),
+    sol_l1s:      List[str] = Query(default=[]),
+    _user=Depends(verify_token),
+):
+    """
+    Closed deals (no Digital SA in VAT) matched against open opps at the same
+    account+LoB that are stuck in risky DRM categories (Partner Upside,
+    Partner Forecasted, Exclude from Pipeline, Disc/Lost).
+    """
+    closed_extra: list[str] = []
+    closed_params: list = []
+    if closing_qtrs:
+        ph = ",".join(["?"] * len(closing_qtrs))
+        closed_extra.append(f"closing_qtr IN ({ph})")
+        closed_params.extend(closing_qtrs)
+    if regions:
+        ph = ",".join(["?"] * len(regions))
+        closed_extra.append(f"region_lvl3 IN ({ph})")
+        closed_params.extend(regions)
+    if sol_l1s:
+        ph = ",".join(["?"] * len(sol_l1s))
+        closed_extra.append(f"solution_area_l1 IN ({ph})")
+        closed_params.extend(sol_l1s)
+    closed_filter = ("AND " + " AND ".join(closed_extra)) if closed_extra else ""
+
+    sql = f"""
+        WITH latest_opps AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   solution_area_l1, sub_solution_area_l2,
+                   drm_category, opp_phase, closing_qtr,
+                   acv_total_opp, vat_dh
+            FROM (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, sub_solution_area_l2,
+                       drm_category, opp_phase, closing_qtr,
+                       acv_total_opp, vat_dh,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY snapshot_week DESC) AS rn
+                FROM pipeline
+            ) t
+            WHERE t.rn = 1
+        ),
+        closed_no_dh AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   solution_area_l1, sub_solution_area_l2,
+                   closing_date, closing_qtr, region_lvl3,
+                   acv_total_opp, vat_full, opp_owner_name, flsm, drm_category
+            FROM (
+                SELECT opportunity_id, account_name, opp_description,
+                       solution_area_l1, sub_solution_area_l2,
+                       closing_date, closing_qtr, region_lvl3,
+                       acv_total_opp, vat_full, opp_owner_name, flsm, drm_category,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+                FROM pipeline
+                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                  AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+                  AND (vat_dh IS NULL OR vat_dh = '')
+                  {closed_filter}
+            ) t
+            WHERE t.rn = 1
+        ),
+        shadow_opps AS (
+            SELECT opportunity_id AS shadow_opp_id,
+                   account_name, opp_description AS shadow_description,
+                   solution_area_l1, sub_solution_area_l2 AS shadow_sol_l2,
+                   drm_category AS shadow_drm, opp_phase AS shadow_phase,
+                   closing_qtr AS shadow_closing_qtr,
+                   acv_total_opp AS shadow_acv, vat_dh AS shadow_vat_dh
+            FROM latest_opps
+            WHERE drm_category IN ('Partner Upside','Partner Forecasted',
+                                   'Exclude from Pipeline','Disc/Lost')
+        )
+        SELECT
+            c.opportunity_id       AS closed_opp_id,
+            c.account_name,
+            c.opp_description      AS closed_description,
+            c.solution_area_l1     AS closed_sol_l1,
+            c.sub_solution_area_l2 AS closed_sol_l2,
+            c.closing_date,
+            c.closing_qtr,
+            c.region_lvl3,
+            c.acv_total_opp        AS closed_acv,
+            c.opp_owner_name,
+            c.flsm,
+            c.drm_category         AS closed_drm,
+            s.shadow_opp_id,
+            s.shadow_description,
+            s.shadow_sol_l2,
+            s.shadow_drm,
+            s.shadow_phase,
+            s.shadow_closing_qtr,
+            s.shadow_acv,
+            s.shadow_vat_dh
+        FROM closed_no_dh c
+        JOIN shadow_opps s
+          ON  s.account_name     = c.account_name
+          AND s.shadow_opp_id   != c.opportunity_id
+          AND s.solution_area_l1 = c.closed_sol_l1
+        ORDER BY c.closing_date DESC NULLS LAST, c.account_name, c.opportunity_id
+    """
+    all_params = closed_params or None
+    rows = query(sql, all_params)
+    return [dict(r) for r in rows]
+
+
 @router.get("/bookings/shadow-comments")
 def get_shadow_comments(_user=Depends(verify_token)):
     _ensure_shadow_comments_table()
