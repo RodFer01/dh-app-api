@@ -425,3 +425,106 @@ def get_stalled(
         }
         for r in rows
     ]
+
+
+# ── /top-opps ─────────────────────────────────────────────────────────────────
+@router.get("/top-opps")
+def get_top_opps(
+    snapshot_week:    Optional[str] = Query(None),
+    limit:            int           = Query(20, ge=1, le=100),
+    closing_qtrs:     List[str]     = Query(default=[]),
+    regions:          List[str]     = Query(default=[]),
+    sol_l1s:          List[str]     = Query(default=[]),
+    drms:             List[str]     = Query(default=[]),
+    opp_phases:       List[str]     = Query(default=[]),
+    region_lvl4s:     List[str]     = Query(default=[]),
+    sol_l2s:          List[str]     = Query(default=[]),
+    flsms:            List[str]     = Query(default=[]),
+    channel_partners: List[str]     = Query(default=[]),
+    opp_owners:       List[str]     = Query(default=[]),
+    local_owners:     List[str]     = Query(default=[]),
+    qual_decisions:   List[str]     = Query(default=[]),
+    iss_groups:       List[str]     = Query(default=[]),
+    iacs:             List[str]     = Query(default=[]),
+    acc_sub_segments: List[str]     = Query(default=[]),
+    engagement_types: List[str]     = Query(default=[]),
+    token: str = Depends(verify_token),
+) -> List[Dict[str, Any]]:
+    effective_week = snapshot_week or _latest_snapshot()
+    if effective_week is None:
+        return []
+
+    where, params = _pp_build_where(
+        snapshot_week=effective_week,
+        closing_qtrs=closing_qtrs, regions=regions, sol_l1s=sol_l1s, drms=drms,
+        opp_phases=opp_phases, region_lvl4s=region_lvl4s, sol_l2s=sol_l2s,
+        flsms=flsms, channel_partners=channel_partners, opp_owners=opp_owners,
+        local_owners=local_owners, qual_decisions=qual_decisions, iss_groups=iss_groups,
+        iacs=iacs, acc_sub_segments=acc_sub_segments, engagement_types=engagement_types,
+    )
+
+    rows = query(
+        f"""
+        SELECT TOP {int(limit)}
+            opportunity_id, account_name, opp_owner_name, region_lvl3,
+            drm_category, opp_phase, acv_usd, age_days, dda_status,
+            solution_area_l1, channel_partner, closing_qtr, engagement_type
+        FROM past_pipeline
+        {where}
+        ORDER BY acv_usd DESC
+        """,
+        params or None,
+    )
+    if not rows:
+        return []
+
+    # Previous snapshot for WoW diff
+    prev_rows = query(
+        "SELECT MAX(snapshot_week) AS prev_week FROM past_pipeline WHERE snapshot_week < %s",
+        [effective_week],
+    )
+    prev_week = None
+    if prev_rows and prev_rows[0].get("prev_week"):
+        prev_week = str(prev_rows[0]["prev_week"])[:10]
+
+    prev_map: Dict[str, Any] = {}
+    if prev_week:
+        opp_ids = [r["opportunity_id"] for r in rows]
+        ph = ",".join(["%s"] * len(opp_ids))
+        prev_data = query(
+            f"""
+            SELECT opportunity_id, drm_category, opp_phase, acv_usd
+            FROM past_pipeline
+            WHERE snapshot_week = %s AND opportunity_id IN ({ph})
+            """,
+            [prev_week] + opp_ids,
+        )
+        prev_map = {r["opportunity_id"]: r for r in prev_data}
+
+    result = []
+    for r in rows:
+        prev = prev_map.get(r["opportunity_id"])
+        curr_acv = float(r["acv_usd"] or 0.0)
+        prev_acv = float(prev["acv_usd"] or 0.0) if prev else None
+        result.append({
+            "opportunity_id":   r["opportunity_id"],
+            "account_name":     r["account_name"],
+            "opp_owner_name":   r["opp_owner_name"],
+            "region_lvl3":      r["region_lvl3"],
+            "drm_category":     r["drm_category"],
+            "opp_phase":        r["opp_phase"],
+            "acv_usd":          curr_acv,
+            "age_days":         int(r["age_days"] or 0),
+            "dda_status":       r["dda_status"],
+            "solution_area_l1": r["solution_area_l1"],
+            "channel_partner":  r["channel_partner"],
+            "closing_qtr":      r["closing_qtr"],
+            "engagement_type":  r["engagement_type"],
+            "prev_drm":         prev["drm_category"] if prev else None,
+            "prev_phase":       prev["opp_phase"] if prev else None,
+            "prev_acv":         prev_acv,
+            "drm_changed":      bool(prev and prev["drm_category"] != r["drm_category"]),
+            "phase_changed":    bool(prev and prev["opp_phase"] != r["opp_phase"]),
+            "acv_changed":      bool(prev_acv is not None and abs(prev_acv - curr_acv) > 100),
+        })
+    return result
