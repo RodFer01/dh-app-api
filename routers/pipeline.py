@@ -1426,27 +1426,44 @@ def get_shadow_debug(_user=Depends(verify_token)):
                AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
                AND (vat_dh IS NULL OR vat_dh = '')
             ) AS closed_no_dsa,
-            (SELECT COUNT(*) FROM pipeline
+            (SELECT COUNT(DISTINCT account_name) FROM pipeline
              WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
                AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
                AND (vat_dh IS NULL OR vat_dh = '')
-               AND sde_primary_engagement_name IS NOT NULL
-               AND sde_primary_engagement_name != ''
-            ) AS closed_lines_with_product,
-            (SELECT COUNT(*) FROM pipeline
+            ) AS closed_accounts,
+            (SELECT COUNT(DISTINCT opportunity_id) FROM pipeline
              WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-               AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
-               AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
-               AND sde_primary_engagement_name IS NOT NULL
-               AND sde_primary_engagement_name != ''
-            ) AS shadow_lines_with_product,
-            (SELECT COUNT(*) FROM pipeline
+               AND vat_dh IS NOT NULL AND vat_dh != ''
+            ) AS dsa_opps,
+            (SELECT COUNT(DISTINCT account_name) FROM pipeline
              WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-               AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
-               AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
-               AND sub_solution_area_l2 IS NOT NULL
-               AND sub_solution_area_l2 != ''
-            ) AS shadow_lines_with_l2
+               AND vat_dh IS NOT NULL AND vat_dh != ''
+            ) AS dsa_accounts,
+            (SELECT COUNT(DISTINCT account_name) FROM pipeline
+             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+               AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+               AND (vat_dh IS NULL OR vat_dh = '')
+               AND account_name IN (
+                   SELECT DISTINCT account_name FROM pipeline
+                   WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                     AND vat_dh IS NOT NULL AND vat_dh != ''
+               )
+            ) AS account_overlap,
+            (SELECT COUNT(*) FROM (
+               SELECT DISTINCT cl.account_name, cl.sub_solution_area_l2
+               FROM pipeline cl
+               JOIN pipeline dl
+                 ON cl.account_name = dl.account_name
+                AND cl.sub_solution_area_l2 = dl.sub_solution_area_l2
+                AND cl.opportunity_id != dl.opportunity_id
+               WHERE cl.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                 AND (cl.drm_category = 'Booked/Won' OR cl.opp_phase = 'A - Purchase')
+                 AND (cl.vat_dh IS NULL OR cl.vat_dh = '')
+                 AND cl.sub_solution_area_l2 IS NOT NULL AND cl.sub_solution_area_l2 != ''
+                 AND dl.snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+                 AND dl.vat_dh IS NOT NULL AND dl.vat_dh != ''
+                 AND dl.sub_solution_area_l2 IS NOT NULL AND dl.sub_solution_area_l2 != ''
+            ) t) AS product_matches
         FROM dummy
     """, None)
     return rows[0] if rows else {}
