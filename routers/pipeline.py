@@ -1485,6 +1485,7 @@ def get_shadow_opps(
 
     sql = f"""
         WITH closed_base AS (
+            -- Booked/Won opps with NO Digital SA in the VAT
             SELECT opportunity_id, account_name, opp_description,
                    solution_area_l1, sub_solution_area_l2,
                    drm_category, opp_phase,
@@ -1497,6 +1498,7 @@ def get_shadow_opps(
               {closed_filter}
         ),
         closed_lines AS (
+            -- Product lines (L2) for closed opps without DSA
             SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
             FROM closed_base
             WHERE sub_solution_area_l2 IS NOT NULL
@@ -1514,47 +1516,50 @@ def get_shadow_opps(
                 FROM closed_base
             ) t WHERE rn = 1
         ),
-        shadow_base AS (
+        dsa_base AS (
+            -- Any opp (any DRM, open or closed) at the same accounts that HAS a DSA in VAT
             SELECT opportunity_id, account_name, opp_description,
                    sub_solution_area_l2,
                    drm_category, opp_phase,
                    closing_qtr, acv_total_opp, vat_dh
             FROM pipeline
             WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-              AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
-              AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
+              AND vat_dh IS NOT NULL
+              AND vat_dh != ''
         ),
-        shadow_lines AS (
+        dsa_lines AS (
+            -- Product lines (L2) for DSA opps
             SELECT DISTINCT opportunity_id, account_name, sub_solution_area_l2
-            FROM shadow_base
+            FROM dsa_base
             WHERE sub_solution_area_l2 IS NOT NULL
               AND sub_solution_area_l2 != ''
         ),
-        shadow_headers AS (
+        dsa_headers AS (
             SELECT opportunity_id, opp_description, drm_category, opp_phase,
                    closing_qtr, acv_total_opp, vat_dh
             FROM (
                 SELECT opportunity_id, opp_description, drm_category, opp_phase,
                        closing_qtr, acv_total_opp, vat_dh,
                        ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
-                FROM shadow_base
+                FROM dsa_base
             ) t WHERE rn = 1
         ),
         product_matches AS (
-            SELECT cl.opportunity_id   AS closed_opp_id,
-                   sl.opportunity_id   AS shadow_opp_id,
+            -- Pairs where closed (no DSA) and DSA opp share same account + L2 product
+            SELECT cl.opportunity_id      AS closed_opp_id,
+                   dl.opportunity_id      AS dsa_opp_id,
                    cl.sub_solution_area_l2 AS matched_product
             FROM closed_lines cl
-            JOIN shadow_lines sl
-              ON cl.account_name          = sl.account_name
-             AND cl.sub_solution_area_l2  = sl.sub_solution_area_l2
-             AND cl.opportunity_id       != sl.opportunity_id
+            JOIN dsa_lines dl
+              ON cl.account_name         = dl.account_name
+             AND cl.sub_solution_area_l2 = dl.sub_solution_area_l2
+             AND cl.opportunity_id      != dl.opportunity_id
         ),
         pair_products AS (
-            SELECT closed_opp_id, shadow_opp_id,
+            SELECT closed_opp_id, dsa_opp_id,
                    STRING_AGG(matched_product, ' | ') AS matched_products
             FROM product_matches
-            GROUP BY closed_opp_id, shadow_opp_id
+            GROUP BY closed_opp_id, dsa_opp_id
         )
         SELECT
             ch.opportunity_id   AS closed_opp_id,
@@ -1568,17 +1573,17 @@ def get_shadow_opps(
             ch.opp_owner_name,
             ch.flsm,
             ch.drm_category     AS closed_drm,
-            sh.opportunity_id   AS shadow_opp_id,
-            sh.opp_description  AS shadow_description,
-            sh.drm_category     AS shadow_drm,
-            sh.opp_phase        AS shadow_phase,
-            sh.closing_qtr      AS shadow_closing_qtr,
-            sh.acv_total_opp    AS shadow_acv,
-            sh.vat_dh           AS shadow_vat_dh,
+            dh.opportunity_id   AS shadow_opp_id,
+            dh.opp_description  AS shadow_description,
+            dh.drm_category     AS shadow_drm,
+            dh.opp_phase        AS shadow_phase,
+            dh.closing_qtr      AS shadow_closing_qtr,
+            dh.acv_total_opp    AS shadow_acv,
+            dh.vat_dh           AS shadow_vat_dh,
             pp.matched_products
         FROM pair_products pp
         JOIN closed_headers ch ON ch.opportunity_id = pp.closed_opp_id
-        JOIN shadow_headers sh ON sh.opportunity_id = pp.shadow_opp_id
+        JOIN dsa_headers dh    ON dh.opportunity_id = pp.dsa_opp_id
         ORDER BY ch.closing_date DESC NULLS LAST, ch.account_name, ch.opportunity_id
     """
     all_params = closed_params or None
