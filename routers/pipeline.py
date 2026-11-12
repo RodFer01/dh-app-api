@@ -1448,79 +1448,102 @@ def get_shadow_opps(
     closed_filter = ("AND " + " AND ".join(closed_extra)) if closed_extra else ""
 
     sql = f"""
-        WITH latest_opps AS (
+        WITH closed_base AS (
             SELECT opportunity_id, account_name, opp_description,
-                   solution_area_l1, sub_solution_area_l2,
-                   drm_category, opp_phase, closing_qtr,
-                   acv_total_opp, vat_dh
-            FROM (
-                SELECT opportunity_id, account_name, opp_description,
-                       solution_area_l1, sub_solution_area_l2,
-                       drm_category, opp_phase, closing_qtr,
-                       acv_total_opp, vat_dh,
-                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
-                FROM pipeline
-                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-            ) t
-            WHERE t.rn = 1
-        ),
-        closed_no_dh AS (
-            SELECT opportunity_id, account_name, opp_description,
-                   solution_area_l1, sub_solution_area_l2,
+                   solution_area_l1, sde_primary_engagement_name,
+                   drm_category, opp_phase,
                    closing_date, closing_qtr, region_lvl3,
+                   acv_total_opp, vat_full, opp_owner_name, flsm
+            FROM pipeline
+            WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
+              AND (vat_dh IS NULL OR vat_dh = '')
+              {closed_filter}
+        ),
+        closed_lines AS (
+            SELECT DISTINCT opportunity_id, account_name, sde_primary_engagement_name
+            FROM closed_base
+            WHERE sde_primary_engagement_name IS NOT NULL
+              AND sde_primary_engagement_name != ''
+        ),
+        closed_headers AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   solution_area_l1, closing_date, closing_qtr, region_lvl3,
                    acv_total_opp, vat_full, opp_owner_name, flsm, drm_category
             FROM (
                 SELECT opportunity_id, account_name, opp_description,
-                       solution_area_l1, sub_solution_area_l2,
-                       closing_date, closing_qtr, region_lvl3,
+                       solution_area_l1, closing_date, closing_qtr, region_lvl3,
                        acv_total_opp, vat_full, opp_owner_name, flsm, drm_category,
                        ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
-                FROM pipeline
-                WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
-                  AND (drm_category = 'Booked/Won' OR opp_phase = 'A - Purchase')
-                  AND (vat_dh IS NULL OR vat_dh = '')
-                  {closed_filter}
-            ) t
-            WHERE t.rn = 1
+                FROM closed_base
+            ) t WHERE rn = 1
         ),
-        shadow_opps AS (
-            SELECT opportunity_id AS shadow_opp_id,
-                   account_name, opp_description AS shadow_description,
-                   solution_area_l1, sub_solution_area_l2 AS shadow_sol_l2,
-                   drm_category AS shadow_drm, opp_phase AS shadow_phase,
-                   closing_qtr AS shadow_closing_qtr,
-                   acv_total_opp AS shadow_acv, vat_dh AS shadow_vat_dh
-            FROM latest_opps
-            WHERE drm_category IN ('Partner Upside','Partner Forecasted',
-                                   'Exclude from Pipeline','Disc/Lost')
+        shadow_base AS (
+            SELECT opportunity_id, account_name, opp_description,
+                   sde_primary_engagement_name,
+                   drm_category, opp_phase,
+                   closing_qtr, acv_total_opp, vat_dh
+            FROM pipeline
+            WHERE snapshot_week = (SELECT MAX(snapshot_week) FROM pipeline)
+              AND (drm_category != 'Booked/Won' OR drm_category IS NULL)
+              AND (opp_phase IS NULL OR opp_phase != 'A - Purchase')
+        ),
+        shadow_lines AS (
+            SELECT DISTINCT opportunity_id, account_name, sde_primary_engagement_name
+            FROM shadow_base
+            WHERE sde_primary_engagement_name IS NOT NULL
+              AND sde_primary_engagement_name != ''
+        ),
+        shadow_headers AS (
+            SELECT opportunity_id, opp_description, drm_category, opp_phase,
+                   closing_qtr, acv_total_opp, vat_dh
+            FROM (
+                SELECT opportunity_id, opp_description, drm_category, opp_phase,
+                       closing_qtr, acv_total_opp, vat_dh,
+                       ROW_NUMBER() OVER (PARTITION BY opportunity_id ORDER BY acv_total_opp DESC) AS rn
+                FROM shadow_base
+            ) t WHERE rn = 1
+        ),
+        product_matches AS (
+            SELECT cl.opportunity_id  AS closed_opp_id,
+                   sl.opportunity_id  AS shadow_opp_id,
+                   cl.sde_primary_engagement_name AS matched_product
+            FROM closed_lines cl
+            JOIN shadow_lines sl
+              ON cl.account_name              = sl.account_name
+             AND cl.sde_primary_engagement_name = sl.sde_primary_engagement_name
+             AND cl.opportunity_id            != sl.opportunity_id
+        ),
+        pair_products AS (
+            SELECT closed_opp_id, shadow_opp_id,
+                   STRING_AGG(matched_product, ' | ') AS matched_products
+            FROM product_matches
+            GROUP BY closed_opp_id, shadow_opp_id
         )
         SELECT
-            c.opportunity_id       AS closed_opp_id,
-            c.account_name,
-            c.opp_description      AS closed_description,
-            c.solution_area_l1     AS closed_sol_l1,
-            c.sub_solution_area_l2 AS closed_sol_l2,
-            c.closing_date,
-            c.closing_qtr,
-            c.region_lvl3,
-            c.acv_total_opp        AS closed_acv,
-            c.opp_owner_name,
-            c.flsm,
-            c.drm_category         AS closed_drm,
-            s.shadow_opp_id,
-            s.shadow_description,
-            s.shadow_sol_l2,
-            s.shadow_drm,
-            s.shadow_phase,
-            s.shadow_closing_qtr,
-            s.shadow_acv,
-            s.shadow_vat_dh
-        FROM closed_no_dh c
-        JOIN shadow_opps s
-          ON  s.account_name     = c.account_name
-          AND s.shadow_opp_id   != c.opportunity_id
-          AND s.solution_area_l1 = c.solution_area_l1
-        ORDER BY c.closing_date DESC NULLS LAST, c.account_name, c.opportunity_id
+            ch.opportunity_id   AS closed_opp_id,
+            ch.account_name,
+            ch.opp_description  AS closed_description,
+            ch.solution_area_l1 AS closed_sol_l1,
+            ch.closing_date,
+            ch.closing_qtr,
+            ch.region_lvl3,
+            ch.acv_total_opp    AS closed_acv,
+            ch.opp_owner_name,
+            ch.flsm,
+            ch.drm_category     AS closed_drm,
+            sh.opportunity_id   AS shadow_opp_id,
+            sh.opp_description  AS shadow_description,
+            sh.drm_category     AS shadow_drm,
+            sh.opp_phase        AS shadow_phase,
+            sh.closing_qtr      AS shadow_closing_qtr,
+            sh.acv_total_opp    AS shadow_acv,
+            sh.vat_dh           AS shadow_vat_dh,
+            pp.matched_products
+        FROM pair_products pp
+        JOIN closed_headers ch ON ch.opportunity_id = pp.closed_opp_id
+        JOIN shadow_headers sh ON sh.opportunity_id = pp.shadow_opp_id
+        ORDER BY ch.closing_date DESC NULLS LAST, ch.account_name, ch.opportunity_id
     """
     all_params = closed_params or None
     rows = query(sql, all_params)
