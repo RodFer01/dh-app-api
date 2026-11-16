@@ -2,6 +2,12 @@
 dh-app-api — FastAPI backend for Digital Hub SA Main App.
 Run: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
